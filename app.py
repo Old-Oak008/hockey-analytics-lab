@@ -19,6 +19,12 @@ def elo(d):
         for t,x in delta.items(): rating[t]=rating.get(t,1500)+x
     return rating
 
+def recent_shift(d,h,a):
+    def recent(t):
+        m=d[(d.home==t)|(d.away==t)].sort_values("date").tail(5)
+        return (m.hg.where(m.home==t,m.ag)-m.ag.where(m.home==t,m.hg)).sum()/(len(m)+5)
+    return .06*(recent(h)-recent(a))
+
 def advanced(d,h,a,ratings):
     x,y=rates(d,h,a)
     def recent(t):
@@ -46,7 +52,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.4 • Advanced Analytics • Poisson • výsledky po 60 minutách')
+st.caption('v0.5 • Validation Lab • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 elh_fixtures=[]
@@ -92,6 +98,15 @@ if mode=='Ruční scénář':
     h=st.text_input('Domácí','Hradec'); a=st.text_input('Hosté','Třinec')
     lh=st.number_input('Očekávané góly domácích',.1,12.,2.5,.1); la=st.number_input('Očekávané góly hostů',.1,12.,3.2,.1)
 elif d is not None and not d.empty:
+    with st.expander('Rozšíření historických dat (volitelné)'):
+        extra=st.file_uploader('Starší sezony stejné soutěže, skóre po 60 minutách',type='csv',accept_multiple_files=True)
+        if extra:
+            try:
+                combined=validate(pd.concat([d]+[pd.read_csv(f) for f in extra],ignore_index=True))
+                if combined.duplicated(['date','home','away']).any(): raise ValueError('Rozporné skóre stejného zápasu.')
+                d=combined
+                st.caption(f'Rozšířená historie: {len(d)} zápasů.')
+            except Exception as e: st.error(str(e))
     teams=sorted(set(d.home)|set(d.away))
     cutoff=st.date_input('Datum predikce (datum zápasu dle zdroje)',date.today())
     past=d[d.date<pd.Timestamp(cutoff)]
@@ -170,3 +185,30 @@ if d is not None and st.button('Porovnat modely na historii (walk-forward)'):
         st.dataframe(result,hide_index=True,use_container_width=True)
         st.caption('Oba modely na stejných zápasech, vždy jen předchozí dny. Nižší Brier a Log Loss jsou lepší. Výsledek není nezávislá validace po výběru modelu.')
     except ValueError as e: st.info(str(e))
+
+if d is not None:
+    st.subheader('Validační laboratoř')
+    st.caption('Chronologické ladění na prvních 70 % vyhodnotitelných dnů, test na zbývajících dnech. Váhy se automaticky nepřenášejí do živé predikce.')
+    if st.button('Spustit validaci 1X2 a Over/Under'):
+        try:
+            from validation import evaluate
+            with st.spinner('Testuji modely…'):
+                params,boundary,n,summary,ou,cal=evaluate(past,elo,recent_shift)
+            st.session_state['validation_result']=(params,boundary,n,summary,ou,cal)
+            st.session_state['validation_key']=(mode,str(cutoff),len(past),int(pd.util.hash_pandas_object(past,index=False).sum()))
+        except Exception as e: st.error(str(e))
+    if st.session_state.get('validation_key')==(mode,str(cutoff),len(past),int(pd.util.hash_pandas_object(past,index=False).sum())):
+        params,boundary,n,summary,ou,cal=st.session_state['validation_result']
+        st.write(f'Ladění: {n} zápasů. Test od {boundary.date()}. Váhy Elo / forma / celkové góly: {params}.')
+        st.dataframe(summary,hide_index=True)
+        st.dataframe(ou,hide_index=True)
+        st.write('Kontrola kalibrace laděného modelu (Over)')
+        st.dataframe(cal,hide_index=True)
+        st.caption('Nižší Brier a Log Loss jsou lepší. Malé skupiny jsou nespolehlivé. Opakovaný výběr podle tohoto testu vyžaduje nový nezávislý test.')
+    with st.expander('Monte Carlo – kontrola numerické nejistoty'):
+        if st.button('100 000 simulací'):
+            import numpy as np
+            rng=np.random.default_rng(42); x=rng.poisson(lh,100000); y=rng.poisson(la,100000)
+            st.write(f'Domácí {np.mean(x>y):.2%} | remíza {np.mean(x==y):.2%} | hosté {np.mean(x<y):.2%}')
+            st.write(pd.DataFrame({'Over':[4.5,5.5,6.5],'Simulace':[float(np.mean(x+y>k)) for k in (4.5,5.5,6.5)]}))
+            st.caption('Simulace stejného Poissonova modelu; nezahrnuje nejistotu vstupních parametrů a nezvyšuje přesnost modelu.')
