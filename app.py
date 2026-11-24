@@ -52,7 +52,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.7 • Dynamic Analytics Engine • Poisson • výsledky po 60 minutách')
+st.caption('v0.8 • Advanced Statistics Beta • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 elh_fixtures=[]
@@ -271,3 +271,28 @@ if d is not None:
         st.download_button('Stáhnout dynamický souhrn CSV',summary.to_csv(index=False),file_name='dynamicky_test.csv')
         st.download_button('Stáhnout jednotlivé predikce CSV',detail.to_csv(index=False),file_name='dynamicke_predikce.csv')
         st.caption('Retrospektivní vývojový test, nikoli nový nezávislý důkaz přesnosti. Nižší Brier a Log Loss jsou lepší.')
+
+if d is not None and mode=='NHL API':
+    st.subheader('Pokročilé statistiky NHL – v0.8 beta')
+    st.markdown('Zdroj: [MoneyPuck.com](https://www.moneypuck.com/data.htm). Stáhni soubor **all game level data for all teams for all seasons** a nahraj jej níže. Pouze nekomerční použití.')
+    st.caption('Model využívá průměry xG, střel pro a proti z posledních 15 utkání a dny odpočinku. Žádná statistika právě predikovaného dne se nepoužívá. Živé predikce zůstávají beze změny.')
+    mp=st.file_uploader('MoneyPuck týmové statistiky (CSV nebo ZIP)',type=['csv','zip'],key='mp08')
+    if mp is not None:
+        import hashlib
+        mp_key=(hashlib.sha256(mp.getbuffer()).hexdigest(),str(cutoff),int(pd.util.hash_pandas_object(history,index=False).sum()))
+    if mp is not None and st.button('Spustit test pokročilých statistik'):
+        try:
+            from advanced import read_stats,evaluate
+            with st.spinner('Testuji pokročilé statistiky…'):
+                stats=read_stats(mp)
+                report,detail,n=evaluate(history[history.date<pd.Timestamp(cutoff)],stats)
+            st.session_state['mp08_result']=(report,detail,n,str(stats.date.max().date()))
+            st.session_state['mp08_key']=mp_key
+        except Exception as e: st.session_state.pop('mp08_result',None); st.error(str(e))
+    if mp is not None and 'mp08_result' in st.session_state and st.session_state.get('mp08_key')==mp_key:
+        report,detail,n,last=st.session_state['mp08_result']
+        st.write(f'Použitelné zápasy: {n}; poslední datum MoneyPuck: {last}.')
+        st.dataframe(report,hide_index=True)
+        st.download_button('Stáhnout pokročilý souhrn CSV',report.to_csv(index=False),file_name='advanced_summary.csv')
+        st.download_button('Stáhnout pokročilý detail CSV',detail.to_csv(index=False),file_name='advanced_detail.csv')
+        st.caption('Test každých 28 dní, trénink jen na předchozích blocích. Výsledky porovnávej s v0.7 jen na totožných zápasech.')
