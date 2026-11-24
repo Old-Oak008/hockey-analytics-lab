@@ -52,7 +52,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.0 • PRO beta • výsledky po 60 minutách')
+st.caption('v1.1 • Goaltender Intelligence beta • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 mp=None
@@ -396,3 +396,63 @@ if d is not None and mode=='NHL API':
         st.download_button('Stáhnout souhrn v0.9 CSV',summary.to_csv(index=False),file_name='special_summary.csv')
         st.download_button('Stáhnout detail v0.9 CSV',detail.to_csv(index=False),file_name='special_detail.csv')
         st.caption('Všechny tři modely používají shodné zápasy a časové bloky. Tento laboratorní test nemění nastavení modelu PRO.')
+
+    st.subheader('Individuální brankáři – v1.1 beta')
+    st.markdown('Zdroj: [MoneyPuck.com – Game By Game Level Data](https://www.moneypuck.com/data.htm). Stáhni brankářské **Goalies** soubory pro aktuální a předchozí sezony, nikoli Season Level Data. Nahrát lze více CSV/ZIP najednou. Pouze nekomerční využití.')
+    st.caption('Historický model odhaduje brankáře z jeho vytížení v předchozích pěti týmových zápasech, bez znalosti skutečně nastupujícího brankáře. Potvrzené sestavy nejsou v tomto zdroji dostupné před zápasem. PRO predikce a archiv zůstávají beze změny.')
+    goalie_files=st.file_uploader('MoneyPuck – zápasová data brankářů',type=['csv','zip'],accept_multiple_files=True,key='goalies11')
+    if goalie_files:
+        try:
+            import hashlib
+            from goalies import read_goalies, GoalieBook, evaluate as goalie_evaluate, scenario as goalie_scenario
+            @st.cache_data(show_spinner=False,max_entries=3)
+            def goalie_load(payload):
+                import io
+                streams=[]
+                for name,content in payload:
+                    f=io.BytesIO(content); f.name=name; streams.append(f)
+                return read_goalies(streams)
+            goalie_data=goalie_load(tuple((f.name,f.getvalue()) for f in goalie_files))
+            book=GoalieBook(goalie_data)
+            day=pd.Timestamp(cutoff)
+            st.caption(f'{len(goalie_data)} brankářských záznamů; {goalie_data.id.nunique()} brankářů; {goalie_data.date.min().date()} až {goalie_data.date.max().date()}.')
+            st.caption('Výběr jen z hráčů s nedávnou historií v daném týmu, nejméně 5 utkání a 100 střelami; nejde o aktuální ověřenou soupisku.')
+            hc=book.candidates(h,day); ac=book.candidates(a,day)
+            if hc and ac:
+                hid=st.selectbox(f'Brankář – {h}',hc,format_func=lambda i:book.profile(i,day)['name'],key=f'goalie11_h_{h}_{cutoff}')
+                aid=st.selectbox(f'Brankář – {a}',ac,format_func=lambda i:book.profile(i,day)['name'],key=f'goalie11_a_{a}_{cutoff}')
+                hp=book.profile(hid,day); ap=book.profile(aid,day)
+                display=[]
+                for label,key,fmt in [('Zápasy (max. 20)','n','d'),('Úspěšnost','sv','.2%'),('Úspěšnost posledních 5','sv5','.2%'),('Úspěšnost posledních 10','sv10','.2%'),('GSAx celkem','gsax','+.2f'),('GSAx / 60 min','gsax60','+.2f'),('GSAx posledních 5','gsax5','+.2f'),('GSAx posledních 10','gsax10','+.2f'),('Dny od posledního zápasu','rest','d'),('Starty / vystoupení za 14 dní','games14','d')]:
+                    display.append([label,format(hp[key],fmt),format(ap[key],fmt)])
+                st.dataframe(pd.DataFrame(display,columns=['Statistika',hp['name'],ap['name']]),hide_index=True)
+                st.caption(f'Poslední dostupná data: {hp["last"]} / {ap["last"]}. GSAx = očekávané minus skutečně inkasované góly. Vystoupení zahrnují i střídání. Statistika max. 20 vystoupení za poslední rok.')
+                if mp is not None and st.button('Spočítat experimentální scénář brankářů'):
+                    try:
+                        from advanced import read_stats
+                        mp.seek(0); stats=read_stats(mp)
+                        with st.spinner('Počítám scénář z uzavřených historických bloků…'):
+                            tab,n=goalie_scenario(history,stats,goalie_data,day,h,a,hid,aid)
+                        st.dataframe(tab.style.format({c:'{:.2%}' for c in tab.columns if c!='Scénář'}),hide_index=True)
+                        st.caption(f'Trénink: {n} zápasů. Ruční výběr není nezávisle validovaný pro potvrzené startéry; scénář není součástí PRO ani archivu.')
+                    except Exception as e: st.error(str(e))
+            else: st.info('Pro jeden nebo oba týmy chybí dostatečně aktuální historie brankářů.')
+            if mp is None: st.info('Pro modelový scénář a historický test nahraj také týmový MoneyPuck soubor výše.')
+            else:
+                goalie_key=(mp_key,tuple(hashlib.sha256(f.getbuffer()).hexdigest() for f in goalie_files))
+                if st.button('Spustit historický test brankářů'):
+                    try:
+                        from advanced import read_stats
+                        mp.seek(0); stats=read_stats(mp)
+                        with st.spinner('Porovnávám modely na stejných zápasech…'):
+                            st.session_state['goalie11_result']=goalie_evaluate(history[history.date<day],stats,goalie_data)
+                            st.session_state['goalie11_key']=goalie_key
+                    except Exception as e: st.session_state.pop('goalie11_result',None); st.error(str(e))
+                if st.session_state.get('goalie11_key')==goalie_key and 'goalie11_result' in st.session_state:
+                    summary,detail,n=st.session_state['goalie11_result']
+                    st.write(f'Společný vzorek před trénovacím obdobím: {n} zápasů.')
+                    st.dataframe(summary,hide_index=True)
+                    st.download_button('Stáhnout souhrn brankářů CSV',summary.to_csv(index=False),file_name='goalie_summary.csv')
+                    st.download_button('Stáhnout detail brankářů CSV',detail.to_csv(index=False),file_name='goalie_detail.csv')
+                    st.caption('Párový chronologický test v0.8 proti v1.1. Neověřuje skutečné potvrzené startéry ani přímo adaptivní model v0.7 pro góly.')
+        except Exception as e: st.error('Brankářská data: '+str(e))
