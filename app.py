@@ -52,7 +52,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.5 • Validation Lab • Poisson • výsledky po 60 minutách')
+st.caption('v0.6 • Historical Data Engine • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 elh_fixtures=[]
@@ -107,6 +107,34 @@ elif d is not None and not d.empty:
                 d=combined
                 st.caption(f'Rozšířená historie: {len(d)} zápasů.')
             except Exception as e: st.error(str(e))
+    with st.expander('Historická databáze – více sezon'):
+        from history import merge_history, season_year
+        if mode=='NHL API':
+            start=int(season[:4])
+            years=st.multiselect('Starší sezony NHL',list(range(start-1,start-5,-1)),default=list(range(start-1,start-5,-1)))
+            if st.button('Stáhnout vybrané starší sezony NHL'):
+                for yr in years:
+                    ss=f'{yr}{yr+1}'; dest=Path('data')/f'nhl_{ss}.csv'
+                    try:
+                        with st.spinner(f'Načítám {ss}…'):
+                            old,errors=load(ss)
+                            if errors or len(old)!=1312 or old.duplicated(['date','home','away']).any(): raise ValueError(f'Neúplná sezona: {len(old)} / 1312 zápasů. '+ '; '.join(errors))
+                            dest.parent.mkdir(exist_ok=True); old.to_csv(dest,index=False)
+                        st.success(f'{ss}: {len(old)} zápasů')
+                    except Exception as e: st.error(f'{ss}: {e}')
+            frames=[d]
+            for yr in years:
+                dest=Path('data')/f'nhl_{yr}{yr+1}.csv'
+                if dest.exists():
+                    old=validate(pd.read_csv(dest))
+                    if len(old)==1312: frames.append(old)
+            history=merge_history(frames)
+        else:
+            history=merge_history([d])
+            st.caption('Starší sezony extraligy přidej výše pomocí CSV z oprávněného zdroje. Automatický archiv zatím není dostupný.')
+        st.dataframe(history.assign(Sezona=season_year(history.date)).groupby('Sezona').size().rename('Zápasů').reset_index(),hide_index=True)
+        st.download_button('Export historických dat CSV',history.to_csv(index=False),file_name='historie.csv')
+        st.caption('Historie pro sezonní test. Živý model NHL nadále používá vybranou sezonu.')
     teams=sorted(set(d.home)|set(d.away))
     cutoff=st.date_input('Datum predikce (datum zápasu dle zdroje)',date.today())
     past=d[d.date<pd.Timestamp(cutoff)]
@@ -212,3 +240,15 @@ if d is not None:
             st.write(f'Domácí {np.mean(x>y):.2%} | remíza {np.mean(x==y):.2%} | hosté {np.mean(x<y):.2%}')
             st.write(pd.DataFrame({'Over':[4.5,5.5,6.5],'Simulace':[float(np.mean(x+y>k)) for k in (4.5,5.5,6.5)]}))
             st.caption('Simulace stejného Poissonova modelu; nezahrnuje nejistotu vstupních parametrů a nezvyšuje přesnost modelu.')
+
+if d is not None:
+    st.subheader('Sezonní test regrese')
+    st.caption('Model se učí pouze ze starších sezon; parametry jsou v testované sezoně zmrazené. Poločas váhy historie 365 dní. Negativně binomické rozdělení pouze pro celkové góly.')
+    if st.button('Spustit sezonní test'):
+        try:
+            from history import season_test
+            with st.spinner('Počítám regresi…'):
+                report=season_test(history[history.date<pd.Timestamp(cutoff)])
+            st.dataframe(report,hide_index=True)
+            st.download_button('Stáhnout výsledky testu CSV',report.to_csv(index=False),file_name='sezonni_test.csv')
+        except Exception as e: st.error(str(e))
