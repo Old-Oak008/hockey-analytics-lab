@@ -3,10 +3,50 @@ import pandas as pd
 from pathlib import Path
 from datetime import date
 from model import validate,rates,predict,backtest
+from scipy.stats import skellam
+import math
+
+def elo(d):
+    rating={}
+    for _, games in d.sort_values("date").groupby("date"):
+        delta={}
+        for g in games.itertuples():
+            h,a=g.home,g.away
+            e=1/(1+10**((rating.get(a,1500)-rating.get(h,1500)-35)/400))
+            actual=1 if g.hg>g.ag else 0 if g.hg<g.ag else .5
+            change=20*(actual-e)
+            delta[h]=delta.get(h,0)+change; delta[a]=delta.get(a,0)-change
+        for t,x in delta.items(): rating[t]=rating.get(t,1500)+x
+    return rating
+
+def advanced(d,h,a,ratings):
+    x,y=rates(d,h,a)
+    def recent(t):
+        m=d[(d.home==t)|(d.away==t)].sort_values("date").tail(5)
+        gf=m.hg.where(m.home==t,m.ag); ga=m.ag.where(m.home==t,m.hg)
+        return (gf-ga).sum()/(len(m)+5)
+    # Experimental coefficients, not fitted. Preserve total expected goals.
+    shift=max(-.35,min(.35,(ratings.get(h,1500)-ratings.get(a,1500))/1200 + .06*(recent(h)-recent(a))))
+    u,v=x*math.exp(shift),y*math.exp(-shift)
+    return u*(x+y)/(u+v),v*(x+y)/(u+v)
+
+def compare(d):
+    results=[[],[]]
+    for day,games in d.groupby("date"):
+        past=d[d.date<day]; r=elo(past)
+        for g in games.itertuples():
+            try: pairs=[rates(past,g.home,g.away),advanced(past,g.home,g.away,r)]
+            except ValueError: continue
+            actual=0 if g.hg>g.ag else 2 if g.hg<g.ag else 1
+            for out,(x,y) in zip(results,pairs):
+                p=[skellam.sf(0,x,y),skellam.pmf(0,x,y),skellam.cdf(-1,x,y)]
+                out.append((sum((v-(i==actual))**2 for i,v in enumerate(p)),-math.log(max(p[actual],1e-15)),int(max(range(3),key=lambda i:p[i])==actual)))
+    if not results[0]: raise ValueError("Nedostatek historie.")
+    return pd.DataFrame([[name,len(r),*[sum(x[i] for x in r)/len(r) for i in range(3)]] for name,r in zip(["Základní Poisson","Experimentální Elo + forma"],results)],columns=["Model","Zápasů","Brier","Log Loss","Přesnost"])
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.3 • ELH Beta • Poisson • výsledky po 60 minutách')
+st.caption('v0.4 • Advanced Analytics • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 elh_fixtures=[]
@@ -56,6 +96,12 @@ elif d is not None and not d.empty:
     cutoff=st.date_input('Datum predikce (datum zápasu dle zdroje)',date.today())
     past=d[d.date<pd.Timestamp(cutoff)]
     game=None
+    fixtures=[]
+    ratings=elo(past)
+    experimental=st.checkbox("Experimentální Elo + forma",value=False)
+    st.caption("Volitelný model s testovacími vahami; zatím nekalibrován. Celkový očekávaný počet gólů nemění.")
+    def selected_rates(h,a):
+        return advanced(past,h,a,ratings) if experimental else rates(past,h,a)
     if mode=='NHL API':
         @st.cache_data(ttl=900,show_spinner=False)
         def schedule(day):
@@ -70,16 +116,30 @@ elif d is not None and not d.empty:
         fixtures=[(h,a) for day,h,a in elh_fixtures if day==cutoff.isoformat() and h in teams and a in teams]
         if fixtures: game=st.selectbox('Zápasy extraligy (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
         else: st.caption('Pro vybraný den nejsou v rozpisu dostupné zápasy.')
+    if fixtures and st.checkbox("Přehled všech zápasů dne"):
+        rows=[]
+        for ht,at in fixtures:
+            try:
+                x,y=selected_rates(ht,at); pp,tt,_=predict(x,y)
+                rows.append([ht+" – "+at,*[f"{z:.1%}" for z in pp],f"{x+y:.2f}"])
+            except ValueError: rows.append([ht+" – "+at,"—","—","—","—"])
+        st.dataframe(pd.DataFrame(rows,columns=["Zápas","1","X","2","Góly"]),hide_index=True,use_container_width=True)
+    st.caption(f"Historie před datem predikce: {len(past)} zápasů, {len(set(past.home)|set(past.away))} týmů.")
     if game: h,a=game
     else:
         h=st.selectbox('Domácí',teams); a=st.selectbox('Hosté',teams,index=min(1,len(teams)-1))
-    try: lh,la=rates(past,h,a)
+    try: lh,la=selected_rates(h,a)
     except ValueError as e: st.info(str(e)); st.stop()
 else: st.stop()
 if h==a: st.error('Vyber dva různé týmy.'); st.stop()
 p,totals,scores=predict(lh,la)
 st.subheader(f'{h} – {a}')
 st.dataframe(pd.DataFrame([[n,f'{v:.1%}',f'{1/v:.2f}' if v else '—'] for n,v in zip(['Domácí','Remíza','Hosté'],p)],columns=['Výsledek','Šance','Férový kurz']),hide_index=True,use_container_width=True)
+if d is not None:
+    st.caption(f'Elo po 60 minutách: {h} {ratings.get(h,1500):.0f} | {a} {ratings.get(a,1500):.0f}')
+with st.expander('Vítěz včetně prodloužení – orientační scénář'):
+    st.write(f'{h}: {p[0]+p[1]/2:.1%} | {a}: {p[2]+p[1]/2:.1%}')
+    st.caption('Remízy rozděleny 50/50; nejde o naučený model prodloužení ani nájezdů.')
 st.write(f'Očekávané góly: {lh:.2f} + {la:.2f} = {lh+la:.2f}')
 rows=[]; candidates=[]
 for k,v in totals:
@@ -98,15 +158,15 @@ if d is not None:
             gf=matches.hg.where(matches.home==team,matches.ag); ga=matches.ag.where(matches.home==team,matches.hg)
             st.write(f'**{team}** — posledních {len(matches)} zápasů: {sum(gf>ga)} V / {sum(gf==ga)} R / {sum(gf<ga)} P, skóre {int(gf.sum())}:{int(ga.sum())} po 60 min.')
             st.caption(f'V modelu: {len(past[past[venue]==team])} zápasů na příslušném hřišti.')
-        st.caption('Forma je zatím informativní a nemění výpočet.')
+        st.caption('Forma mění poměr očekávaných gólů jen při zapnutí experimentálního modelu.')
 with st.expander('Potvrzení brankáři (poznámka)'):
     st.text_input('Brankář domácích',key='goalie_home'); st.text_input('Brankář hostů',key='goalie_away')
     st.caption('Jména jsou pouze poznámka; bez ověřených statistik nemění pravděpodobnosti.')
 st.subheader('Nejpravděpodobnější skóre'); st.dataframe(pd.DataFrame([(f'{i}:{j}',f'{v:.1%}') for i,j,v in scores],columns=['Skóre','Pravděpodobnost']),hide_index=True,use_container_width=True)
-st.caption('Nezávislý Poisson; u historických dat domácí/venkovní síla s vyhlazením 8 ligovými zápasy. Bez kalibrace brankářů, sestav a prodloužení. Férový kurz není doporučení k sázce.')
-if d is not None and st.button('Historický test (walk-forward)'):
+st.caption('Nezávislý Poisson; domácí/venkovní síla s vyhlazením 8 ligovými zápasy. Volitelné experimentální Elo + forma. Bez kalibrace brankářů, sestav a prodloužení. Férový kurz není doporučení k sázce.')
+if d is not None and st.button('Porovnat modely na historii (walk-forward)'):
     try:
-        with st.spinner('Probíhá test...'): n,b,l,acc=backtest(past)
-        st.write(f'Zápasů: {n} | Brier: {b:.3f} | Log Loss: {l:.3f} | Přesnost: {acc:.1%}')
-        st.caption('Test používá jen předchozí dny; nižší Brier a Log Loss jsou lepší. Zatím bez srovnávacího modelu.')
+        with st.spinner('Probíhá test...'): result=compare(past)
+        st.dataframe(result,hide_index=True,use_container_width=True)
+        st.caption('Oba modely na stejných zápasech, vždy jen předchozí dny. Nižší Brier a Log Loss jsou lepší. Výsledek není nezávislá validace po výběru modelu.')
     except ValueError as e: st.info(str(e))
