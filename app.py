@@ -6,9 +6,10 @@ from model import validate,rates,predict,backtest
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.2 • Mobile Edition • Poisson • výsledky po 60 minutách')
-mode=st.radio('Zdroj dat',['NHL API','Vlastní CSV','Ruční scénář'],horizontal=True)
+st.caption('v0.3 • ELH Beta • Poisson • výsledky po 60 minutách')
+mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
+elh_fixtures=[]
 if mode=='NHL API':
     year=date.today().year-(date.today().month<7)
     season=st.selectbox('Sezóna',[f'{y}{y+1}' for y in range(year,2020,-1)])
@@ -21,6 +22,24 @@ if mode=='NHL API':
         except Exception as e: st.error(str(e))
     if path.exists(): d=validate(pd.read_csv(path)); st.caption(f'Lokální data: {len(d)} zápasů, poslední datum {d.date.max().date()}')
     else: st.info('Klikni na stažení dat nebo vyzkoušej ruční scénář.')
+elif mode=='Tipsport extraliga':
+    from elh import load_elh, URL
+    st.caption('Experimentální import: základní část 2026/27. Zdroj: iDNES.cz – los soutěže.')
+    st.markdown(f'[Zdroj výsledků]({URL})')
+    st.caption('Skóre P/N se převádí na remízu po 60 minutách. Dnešní výsledky se do historie nezahrnují.')
+    if st.button('Stáhnout / aktualizovat extraligu'):
+        try:
+            with st.spinner('Načítám rozpis…'):
+                data, fixtures, pending = load_elh()
+                data=validate(data)
+                if data.empty: raise ValueError('Žádné dokončené zápasy.')
+            st.session_state['elh_data']=(data,fixtures,pending)
+        except Exception as e: st.error(f'Import se nezdařil: {e}. Původní data zůstala zachována.')
+    if 'elh_data' in st.session_state:
+        d,elh_fixtures,pending=st.session_state['elh_data']
+        st.caption(f'Načteno {len(d)} zápasů, poslední datum {d.date.max().date()}.')
+        if pending: st.warning(f'{pending} minulých termínů bez rozpoznaného konečného skóre; historie může být neúplná.')
+    else: st.info('Klikni na stažení dat. Při chybě lze využít vlastní CSV.')
 elif mode=='Vlastní CSV':
     st.caption('Sloupce date,home,away,hg,ag; skóre po 60 minutách, datum YYYY-MM-DD.')
     st.download_button('Stáhnout prázdnou šablonu CSV','date,home,away,hg,ag\n',file_name='sablona.csv')
@@ -34,7 +53,7 @@ if mode=='Ruční scénář':
     lh=st.number_input('Očekávané góly domácích',.1,12.,2.5,.1); la=st.number_input('Očekávané góly hostů',.1,12.,3.2,.1)
 elif d is not None and not d.empty:
     teams=sorted(set(d.home)|set(d.away))
-    cutoff=st.date_input('Datum predikce (datum zápasu v datech NHL)',date.today())
+    cutoff=st.date_input('Datum predikce (datum zápasu dle zdroje)',date.today())
     past=d[d.date<pd.Timestamp(cutoff)]
     game=None
     if mode=='NHL API':
@@ -47,6 +66,10 @@ elif d is not None and not d.empty:
             if fixtures: game=st.selectbox('Zápasy NHL (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
             else: st.caption('Pro toto datum nebyly nalezeny zápasy s dostupnou historií.')
         except Exception: st.caption('Rozpis se nepodařilo načíst; ruční výběr je dostupný.')
+    if mode=='Tipsport extraliga':
+        fixtures=[(h,a) for day,h,a in elh_fixtures if day==cutoff.isoformat() and h in teams and a in teams]
+        if fixtures: game=st.selectbox('Zápasy extraligy (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
+        else: st.caption('Pro vybraný den nejsou v rozpisu dostupné zápasy.')
     if game: h,a=game
     else:
         h=st.selectbox('Domácí',teams); a=st.selectbox('Hosté',teams,index=min(1,len(teams)-1))
