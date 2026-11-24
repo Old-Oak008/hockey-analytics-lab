@@ -52,7 +52,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.8 • Advanced Statistics Beta • Poisson • výsledky po 60 minutách')
+st.caption('v0.9 • Advanced Statistics Beta • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 elh_fixtures=[]
@@ -296,3 +296,22 @@ if d is not None and mode=='NHL API':
         st.download_button('Stáhnout pokročilý souhrn CSV',report.to_csv(index=False),file_name='advanced_summary.csv')
         st.download_button('Stáhnout pokročilý detail CSV',detail.to_csv(index=False),file_name='advanced_detail.csv')
         st.caption('Test každých 28 dní, trénink jen na předchozích blocích. Výsledky porovnávej s v0.7 jen na totožných zápasech.')
+
+    st.subheader('Speciální formace a týmové chytání – v0.9 beta')
+    st.caption('MoneyPuck.com: stejný týmový soubor jako výše. Testujeme xG za 60 minut při 5 na 4 a 4 na 5, a týmový rozdíl xGA minus GA a aproximaci úspěšnosti. Nejde o individuální statistiky potvrzeného brankáře. Vše pouze z předchozích dnů.')
+    if mp is not None and st.button('Spustit test speciálních formací'):
+        try:
+            from advanced import read_stats
+            from special import read_extra,evaluate
+            with st.spinner('Porovnávám modely na shodných zápasech…'):
+                mp.seek(0); stats=read_stats(mp); extra=read_extra(mp)
+                st.session_state['special_result']=evaluate(history[history.date<pd.Timestamp(cutoff)],stats,extra)
+                st.session_state['special_key']=mp_key
+        except Exception as e: st.session_state.pop('special_result',None); st.error(str(e))
+    if mp is not None and 'special_result' in st.session_state and st.session_state.get('special_key')==mp_key:
+        summary,detail,n=st.session_state['special_result']
+        st.write(f'Společný vzorek: {n} zápasů před vyřazením trénovacího období.')
+        st.dataframe(summary,hide_index=True)
+        st.download_button('Stáhnout souhrn v0.9 CSV',summary.to_csv(index=False),file_name='special_summary.csv')
+        st.download_button('Stáhnout detail v0.9 CSV',detail.to_csv(index=False),file_name='special_detail.csv')
+        st.caption('Všechny tři modely používají shodné zápasy a časové bloky. Živé predikce se nemění.')
