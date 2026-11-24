@@ -3,10 +3,10 @@ import pandas as pd
 from pathlib import Path
 from datetime import date
 from model import validate,rates,predict,backtest
-from nhl import load
+from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
-st.title('🏒 Hockey Analytics Lab')
-st.caption('v0.1 • Poisson • výsledky po 60 minutách')
+st.markdown('## 🏒 Hockey Analytics Lab')
+st.caption('v0.2 • Mobile Edition • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 if mode=='NHL API':
@@ -33,21 +33,52 @@ if mode=='Ruční scénář':
     h=st.text_input('Domácí','Hradec'); a=st.text_input('Hosté','Třinec')
     lh=st.number_input('Očekávané góly domácích',.1,12.,2.5,.1); la=st.number_input('Očekávané góly hostů',.1,12.,3.2,.1)
 elif d is not None and not d.empty:
-    teams=sorted(set(d.home)|set(d.away)); h=st.selectbox('Domácí',teams); a=st.selectbox('Hosté',teams,index=min(1,len(teams)-1))
-    cutoff=st.date_input('Datum predikce',date.today()); past=d[d.date<pd.Timestamp(cutoff)]
+    teams=sorted(set(d.home)|set(d.away))
+    cutoff=st.date_input('Datum predikce (datum zápasu v datech NHL)',date.today())
+    past=d[d.date<pd.Timestamp(cutoff)]
+    game=None
+    if mode=='NHL API':
+        @st.cache_data(ttl=900,show_spinner=False)
+        def schedule(day):
+            payload=get('/schedule/'+day.isoformat())
+            return [(g['homeTeam']['abbrev'],g['awayTeam']['abbrev']) for week in payload['gameWeek'] if week['date']==day.isoformat() for g in week['games'] if g.get('gameType')==2]
+        try:
+            fixtures=[(x,y) for x,y in schedule(cutoff) if x in teams and y in teams]
+            if fixtures: game=st.selectbox('Zápasy NHL (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
+            else: st.caption('Pro toto datum nebyly nalezeny zápasy s dostupnou historií.')
+        except Exception: st.caption('Rozpis se nepodařilo načíst; ruční výběr je dostupný.')
+    if game: h,a=game
+    else:
+        h=st.selectbox('Domácí',teams); a=st.selectbox('Hosté',teams,index=min(1,len(teams)-1))
     try: lh,la=rates(past,h,a)
     except ValueError as e: st.info(str(e)); st.stop()
 else: st.stop()
 if h==a: st.error('Vyber dva různé týmy.'); st.stop()
 p,totals,scores=predict(lh,la)
 st.subheader(f'{h} – {a}')
-for c,n,v in zip(st.columns(3),['Domácí','Remíza','Hosté'],p): c.metric(n,f'{v:.1%}'); c.caption(f'Férový kurz {1/v:.2f}' if v else '—')
-st.bar_chart(pd.DataFrame({'Pravděpodobnost':p},index=['Domácí','Remíza','Hosté']))
+st.dataframe(pd.DataFrame([[n,f'{v:.1%}',f'{1/v:.2f}' if v else '—'] for n,v in zip(['Domácí','Remíza','Hosté'],p)],columns=['Výsledek','Šance','Férový kurz']),hide_index=True,use_container_width=True)
 st.write(f'Očekávané góly: {lh:.2f} + {la:.2f} = {lh+la:.2f}')
-rows=[]
+rows=[]; candidates=[]
 for k,v in totals:
-    for name,q in [('Over',v),('Under',1-v)]: rows.append([f'{name} {k}',f'{q:.1%}',f'{1/q:.2f}' if q else '—'])
-st.subheader('Gólové hranice po 60 minutách'); st.dataframe(pd.DataFrame(rows,columns=['Hranice','Pravděpodobnost','Férový kurz']),hide_index=True,use_container_width=True)
+    for name,q in [('Over',v),('Under',1-v)]:
+        rows.append([f'{name} {k}',f'{q:.1%}',f'{1/q:.2f}' if q else '—']); candidates.append((q,f'{name} {k}'))
+q,label=max(candidates)
+st.subheader('Nejpravděpodobnější gólová hranice')
+st.write(f'**{label} · {q:.1%} · férový kurz {1/q:.2f}**')
+st.caption('Nejvyšší modelová pravděpodobnost ze zobrazených hranic, nikoli vyhodnocení výhodnosti sázky.')
+with st.expander('Všechny gólové hranice po 60 minutách'):
+    st.dataframe(pd.DataFrame(rows,columns=['Hranice','Pravděpodobnost','Férový kurz']),hide_index=True,use_container_width=True)
+if d is not None:
+    with st.expander('Vstupní statistiky a forma'):
+        for team,venue in [(h,'home'),(a,'away')]:
+            matches=past[(past.home==team)|(past.away==team)].sort_values('date').tail(5)
+            gf=matches.hg.where(matches.home==team,matches.ag); ga=matches.ag.where(matches.home==team,matches.hg)
+            st.write(f'**{team}** — posledních {len(matches)} zápasů: {sum(gf>ga)} V / {sum(gf==ga)} R / {sum(gf<ga)} P, skóre {int(gf.sum())}:{int(ga.sum())} po 60 min.')
+            st.caption(f'V modelu: {len(past[past[venue]==team])} zápasů na příslušném hřišti.')
+        st.caption('Forma je zatím informativní a nemění výpočet.')
+with st.expander('Potvrzení brankáři (poznámka)'):
+    st.text_input('Brankář domácích',key='goalie_home'); st.text_input('Brankář hostů',key='goalie_away')
+    st.caption('Jména jsou pouze poznámka; bez ověřených statistik nemění pravděpodobnosti.')
 st.subheader('Nejpravděpodobnější skóre'); st.dataframe(pd.DataFrame([(f'{i}:{j}',f'{v:.1%}') for i,j,v in scores],columns=['Skóre','Pravděpodobnost']),hide_index=True,use_container_width=True)
 st.caption('Nezávislý Poisson; u historických dat domácí/venkovní síla s vyhlazením 8 ligovými zápasy. Bez kalibrace brankářů, sestav a prodloužení. Férový kurz není doporučení k sázce.')
 if d is not None and st.button('Historický test (walk-forward)'):
