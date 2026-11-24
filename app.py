@@ -38,6 +38,27 @@ def download_file(label, data, file_name, mime=None):
 def download_results(label, zip_name, *files):
     download_file(label, result_zip(files), zip_name, mime='application/zip')
 
+def session_upload(label, slot, multiple=False):
+    """Keep bytes in this browser session even when widget is not rendered."""
+    generation=st.session_state.get(slot+'_generation',0)
+    widget=slot+'_upload_'+str(generation)
+    def remember():
+        value=st.session_state.get(widget)
+        files=(value or []) if multiple else ([value] if value is not None else [])
+        st.session_state[slot]=tuple((f.name,f.getvalue()) for f in files)
+    def forget():
+        st.session_state.pop(slot,None)
+        st.session_state[slot+'_generation']=generation+1
+    st.file_uploader(label,type=['csv','zip'],accept_multiple_files=multiple,key=widget,on_change=remember)
+    payload=st.session_state.get(slot,())
+    if payload:
+        st.caption('Uchováno pro tuto návštěvu: '+', '.join(name for name,_ in payload))
+        st.button('Odebrat uložená data',key=slot+'_clear',on_click=forget)
+    streams=[]
+    for name,raw in payload:
+        f=BytesIO(raw); f.name=name; streams.append(f)
+    return streams if multiple else (streams[0] if streams else None)
+
 def elo(d):
     rating={}
     for _, games in d.sort_values("date").groupby("date"):
@@ -84,7 +105,67 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.1.1 • Oprava stahování • výsledky po 60 minutách')
+st.caption('v1.2 • Player Intelligence beta • týmové výsledky po 60 minutách')
+page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Validační laboratoř / brankáři'],horizontal=True,key='page12')
+if page=='Hráči NHL':
+    from players import TEAMS,season_start,roster,logs,profile,backtest as player_test
+    st.subheader('Hráči NHL – body a góly')
+    st.caption('Zdroj: veřejné webové rozhraní NHL. Žádný soubor MoneyPuck ani týmová historie nejsou nutné. Predikce platí pouze za předpokladu, že hráč nastoupí. Body a góly včetně prodloužení, bez nájezdů.')
+    player_day=st.date_input('Datum hráčské analýzy',date.today(),key='player_day12')
+    yy=season_start(player_day)
+    team=st.selectbox('Tým hráče',TEAMS if yy>=2024 else sorted(set(TEAMS)-{'UTA'}|{'ARI'}),key='player_team12')
+    @st.cache_data(ttl=1800,max_entries=64,show_spinner=False)
+    def player_roster(team,yy):
+        return roster(get(f'/roster/{team}/{yy}{yy+1}'))
+    @st.cache_data(ttl=1800,max_entries=64,show_spinner=False)
+    def player_logs(pid,yy):
+        from requests import HTTPError
+        payloads=[]; warnings=[]
+        for y in (yy-1,yy):
+            try: payloads.append(get(f'/player/{pid}/game-log/{y}{y+1}/2'))
+            except HTTPError as e:
+                if e.response is not None and e.response.status_code==404: warnings.append(f'{y}/{y+1}: záznamy nedostupné (404).')
+                else: raise
+        return logs(payloads),warnings
+    try:
+        names=player_roster(team,yy)
+        pid=st.selectbox('Hráč',list(names),format_func=lambda x:names[x],key=f'player_id12_{team}_{yy}')
+        st.caption('Sezonní soupiska API není potvrzenou sestavou na daný den; u starších dat nemusí odpovídat tehdejší příslušnosti hráče.')
+        key=(pid,str(player_day))
+        if st.button('Analyzovat hráče',key='player_run12'):
+            try:
+                with st.spinner('Načítám zápasy hráče…'):
+                    data,warnings=player_logs(pid,yy)
+                    p,table,past=profile(data,player_day)
+                st.session_state['player_report12']=(key,p,table,past,data,warnings)
+            except Exception as e: st.session_state.pop('player_report12',None); st.error(str(e))
+        report=st.session_state.get('player_report12')
+        if report and report[0]==key:
+            _,p,table,past,data,warnings=report
+            for warning in warnings: st.warning(warning)
+            st.markdown(f'### {names[pid]}')
+            a,b=st.columns(2)
+            a.metric('Získá bod – ANO',f'{p["points"][0]:.1%}')
+            b.metric('Získá bod – NE',f'{1-p["points"][0]:.1%}')
+            st.metric('Vstřelí gól',f'{p["goals"][0]:.1%}')
+            st.caption(f'Dlouhodobý vyhlazený odhad z {len(past)} zápasů. Poslední záznam {past.date.max().date()}.')
+            if len(past)<30 or (pd.Timestamp(player_day)-past.date.max()).days>21:
+                st.warning('Malý nebo zastaralý vzorek; odhad je zvlášť nejistý.')
+            st.dataframe(table.style.format({'Body / zápas':'{:.2f}','Zápasy s bodem':'{:.1%}','Góly / zápas':'{:.2f}','Prům. čas (min)':'{:.1f}'}),hide_index=True)
+            st.caption('Experiment s formou: bod '+f'{p["points"][1]:.1%}'+', gól '+f'{p["goals"][1]:.1%}'+'. Posledních 20 zápasů vyhlazených starší historií. Zatím bez ověřeného vlivu soupeře, xG, přesilovek a sestav.')
+            if st.button('Historický test hráče',key='player_test12'):
+                try:
+                    summary,detail=player_test(data,player_day)
+                    st.session_state['player_test_report12']=(key,summary,detail)
+                except ValueError as e: st.info(str(e))
+            tested=st.session_state.get('player_test_report12')
+            if tested and tested[0]==key:
+                _,summary,detail=tested
+                st.dataframe(summary,hide_index=True)
+                download_results('Stáhnout oba výsledky hráče (ZIP)',f'player_{pid}_results.zip',('player_summary.csv',summary),('player_detail.csv',detail))
+                st.caption('Test jednotlivého hráče, jen předchozí zápasy, podmíněno účastí. Nejde o validaci celé NHL.')
+    except Exception as e: st.error('Hráčská data: '+str(e))
+    st.stop()
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 mp=None
@@ -146,10 +227,16 @@ elif d is not None and not d.empty:
         if mode=='NHL API':
             start=int(season[:4])
             years=st.multiselect('Starší sezony NHL',list(range(start-1,start-5,-1)),default=list(range(start-1,start-5,-1)))
+            force_old=st.checkbox('Znovu stáhnout i již kompletní starší sezony',value=False)
             if st.button('Stáhnout vybrané starší sezony NHL'):
                 for yr in years:
                     ss=f'{yr}{yr+1}'; dest=Path('data')/f'nhl_{ss}.csv'
                     try:
+                        if dest.exists() and not force_old:
+                            cached=validate(pd.read_csv(dest))
+                            if len(cached)==1312 and not cached.duplicated(['date','home','away']).any():
+                                st.info(f'{ss}: již načteno, přeskakuji.')
+                                continue
                         with st.spinner(f'Načítám {ss}…'):
                             old,errors=load(ss)
                             if errors or len(old)!=1312 or old.duplicated(['date','home','away']).any(): raise ValueError(f'Neúplná sezona: {len(old)} / 1312 zápasů. '+ '; '.join(errors))
@@ -197,7 +284,7 @@ elif d is not None and not d.empty:
         st.subheader('Model PRO – NHL')
         pro=st.checkbox('Použít modely PRO (v0.8 výsledek / v0.7 góly)',value=True)
         st.caption('Výběr modelů podle dosavadní retrospektivní validace. Nové zápasy teprve ověří skutečný přínos. Experimentální Elo platí jen pro základní režim.')
-        mp=st.file_uploader('MoneyPuck týmové statistiky (CSV nebo ZIP)',type=['csv','zip'],key='mp08')
+        mp=session_upload('MoneyPuck týmové statistiky (CSV nebo ZIP)','mp12_session')
         st.markdown('[MoneyPuck.com – týmová data](https://www.moneypuck.com/data.htm) · nekomerční použití. Bez aktuálního souboru lze použít náhradní v0.7 pro 1X2.')
         @st.cache_data(ttl=3600,show_spinner=False,max_entries=4)
         def dyn_live(hist,day,pairs):
@@ -320,6 +407,9 @@ if d is not None and mode=='NHL API':
                 st.caption('Vyhodnocení pouze po 60 minutách. První záznam pro kombinaci modelů a zápas; ruční CSV není nezměnitelný auditní log.')
             except Exception as e: st.error(str(e))
 
+if page!='Validační laboratoř / brankáři':
+    st.stop()
+
 if d is not None and st.button('Porovnat modely na historii (walk-forward)'):
     try:
         with st.spinner('Probíhá test...'): result=compare(past)
@@ -429,7 +519,7 @@ if d is not None and mode=='NHL API':
     st.subheader('Individuální brankáři – v1.1 beta')
     st.markdown('Zdroj: [MoneyPuck.com – Game By Game Level Data](https://www.moneypuck.com/data.htm). Stáhni brankářské **Goalies** soubory pro aktuální a předchozí sezony, nikoli Season Level Data. Nahrát lze více CSV/ZIP najednou. Pouze nekomerční využití.')
     st.caption('Historický model odhaduje brankáře z jeho vytížení v předchozích pěti týmových zápasech, bez znalosti skutečně nastupujícího brankáře. Potvrzené sestavy nejsou v tomto zdroji dostupné před zápasem. PRO predikce a archiv zůstávají beze změny.')
-    goalie_files=st.file_uploader('MoneyPuck – zápasová data brankářů',type=['csv','zip'],accept_multiple_files=True,key='goalies11')
+    goalie_files=session_upload('MoneyPuck – zápasová data brankářů','goalie12_session',multiple=True)
     if goalie_files:
         try:
             import hashlib
