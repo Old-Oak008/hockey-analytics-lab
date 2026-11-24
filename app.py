@@ -5,6 +5,38 @@ from datetime import date
 from model import validate,rates,predict,backtest
 from scipy.stats import skellam
 import math
+from io import BytesIO
+from zipfile import ZipFile, ZIP_DEFLATED
+
+
+def result_zip(files):
+    """Pack already computed tables; no model training or disk writes."""
+    out = BytesIO()
+    with ZipFile(out, 'w', compression=ZIP_DEFLATED) as archive:
+        for name, table in files:
+            archive.writestr(name, table.to_csv(index=False).encode('utf-8'))
+    return out.getvalue()
+
+
+def download_file(label, data, file_name, mime=None):
+    # Streamlit >=1.43 supports browser-only downloads. Older supported
+    # releases (>=1.40) can isolate the download in a fragment.
+    import re
+    version = tuple(map(int, re.match(r'(\d+)\.(\d+)', st.__version__).groups()))
+    kwargs = dict(file_name=file_name, key='download_' + file_name)
+    if mime is not None:
+        kwargs['mime'] = mime
+    if version >= (1, 43):
+        st.download_button(label, data, on_click='ignore', **kwargs)
+    else:
+        @st.fragment
+        def isolated_download():
+            st.download_button(label, data, **kwargs)
+        isolated_download()
+
+
+def download_results(label, zip_name, *files):
+    download_file(label, result_zip(files), zip_name, mime='application/zip')
 
 def elo(d):
     rating={}
@@ -52,7 +84,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.1 • Goaltender Intelligence beta • výsledky po 60 minutách')
+st.caption('v1.1.1 • Oprava stahování • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 mp=None
@@ -90,7 +122,7 @@ elif mode=='Tipsport extraliga':
     else: st.info('Klikni na stažení dat. Při chybě lze využít vlastní CSV.')
 elif mode=='Vlastní CSV':
     st.caption('Sloupce date,home,away,hg,ag; skóre po 60 minutách, datum YYYY-MM-DD.')
-    st.download_button('Stáhnout prázdnou šablonu CSV','date,home,away,hg,ag\n',file_name='sablona.csv')
+    download_file('Stáhnout prázdnou šablonu CSV','date,home,away,hg,ag\n',file_name='sablona.csv')
     f=st.file_uploader('Historické zápasy',type='csv')
     if f:
         try: d=validate(pd.read_csv(f))
@@ -135,7 +167,7 @@ elif d is not None and not d.empty:
             history=merge_history([d])
             st.caption('Starší sezony extraligy přidej výše pomocí CSV z oprávněného zdroje. Automatický archiv zatím není dostupný.')
         st.dataframe(history.assign(Sezona=season_year(history.date)).groupby('Sezona').size().rename('Zápasů').reset_index(),hide_index=True)
-        st.download_button('Export historických dat CSV',history.to_csv(index=False),file_name='historie.csv')
+        download_file('Export historických dat CSV',history.to_csv(index=False),file_name='historie.csv')
         st.caption('Historie pro sezonní test a modely PRO. Základní Poisson používá vybranou sezonu.')
     teams=sorted(set(d.home)|set(d.away))
     cutoff=st.date_input('Datum predikce (datum zápasu dle zdroje)',date.today())
@@ -273,7 +305,7 @@ if d is not None and mode=='NHL API':
         st.session_state['pro_export']=(cutoff,h,a,model_1x2,model_goals,tuple(p),tuple(totals),pd.DataFrame([rec]).to_csv(index=False),status)
     rec=st.session_state.get('pro_export')
     if rec and rec[:7]==(cutoff,h,a,model_1x2,model_goals,tuple(p),tuple(totals)):
-        st.caption(rec[8]); st.download_button('Stáhnout záznam predikce CSV',rec[7],file_name=f'predikce_{cutoff}_{h}_{a}.csv')
+        st.caption(rec[8]); download_file('Stáhnout záznam predikce CSV',rec[7],file_name=f'predikce_{cutoff}_{h}_{a}.csv')
     with st.expander('Vyhodnocení uložených předzápasových predikcí'):
         saved=st.file_uploader('Nahraj dříve uložené CSV predikcí',type='csv',accept_multiple_files=True,key='archive10')
         if saved:
@@ -284,7 +316,7 @@ if d is not None and mode=='NHL API':
                 if result.empty: st.info('Zatím žádné dokončené ověřené předzápasové predikce. Aktualizuj výsledky NHL.')
                 else:
                     st.dataframe(result,hide_index=True)
-                    st.download_button('Stáhnout vyhodnocení CSV',detail.to_csv(index=False),file_name='pro_vyhodnoceni.csv')
+                    download_file('Stáhnout vyhodnocení CSV',detail.to_csv(index=False),file_name='pro_vyhodnoceni.csv')
                 st.caption('Vyhodnocení pouze po 60 minutách. První záznam pro kombinaci modelů a zápas; ruční CSV není nezměnitelný auditní log.')
             except Exception as e: st.error(str(e))
 
@@ -331,7 +363,7 @@ if d is not None:
             with st.spinner('Počítám regresi…'):
                 report=season_test(history[history.date<pd.Timestamp(cutoff)])
             st.dataframe(report,hide_index=True)
-            st.download_button('Stáhnout výsledky testu CSV',report.to_csv(index=False),file_name='sezonni_test.csv')
+            download_file('Stáhnout výsledky testu CSV',report.to_csv(index=False),file_name='sezonni_test.csv')
         except Exception as e: st.error(str(e))
 
 if d is not None:
@@ -349,8 +381,7 @@ if d is not None:
     if st.session_state.get('dynamic_key')==dynamic_key:
         summary,detail=st.session_state['dynamic_report']
         st.dataframe(summary,hide_index=True)
-        st.download_button('Stáhnout dynamický souhrn CSV',summary.to_csv(index=False),file_name='dynamicky_test.csv')
-        st.download_button('Stáhnout jednotlivé predikce CSV',detail.to_csv(index=False),file_name='dynamicke_predikce.csv')
+        download_results('Stáhnout oba výsledky dynamického testu (ZIP)', 'dynamic_results.zip', ('dynamicky_test.csv',summary), ('dynamicke_predikce.csv',detail))
         st.caption('Retrospektivní vývojový test, nikoli nový nezávislý důkaz přesnosti. Nižší Brier a Log Loss jsou lepší.')
 
 if d is not None and mode=='NHL API':
@@ -374,8 +405,7 @@ if d is not None and mode=='NHL API':
         report,detail,n,last=st.session_state['mp08_result']
         st.write(f'Použitelné zápasy: {n}; poslední datum MoneyPuck: {last}.')
         st.dataframe(report,hide_index=True)
-        st.download_button('Stáhnout pokročilý souhrn CSV',report.to_csv(index=False),file_name='advanced_summary.csv')
-        st.download_button('Stáhnout pokročilý detail CSV',detail.to_csv(index=False),file_name='advanced_detail.csv')
+        download_results('Stáhnout oba výsledky pokročilých statistik (ZIP)', 'advanced_results.zip', ('advanced_summary.csv',report), ('advanced_detail.csv',detail))
         st.caption('Test každých 28 dní, trénink jen na předchozích blocích. Výsledky porovnávej s v0.7 jen na totožných zápasech.')
 
     st.subheader('Speciální formace a týmové chytání – v0.9 beta')
@@ -393,8 +423,7 @@ if d is not None and mode=='NHL API':
         summary,detail,n=st.session_state['special_result']
         st.write(f'Společný vzorek: {n} zápasů před vyřazením trénovacího období.')
         st.dataframe(summary,hide_index=True)
-        st.download_button('Stáhnout souhrn v0.9 CSV',summary.to_csv(index=False),file_name='special_summary.csv')
-        st.download_button('Stáhnout detail v0.9 CSV',detail.to_csv(index=False),file_name='special_detail.csv')
+        download_results('Stáhnout oba výsledky speciálních formací (ZIP)', 'special_results.zip', ('special_summary.csv',summary), ('special_detail.csv',detail))
         st.caption('Všechny tři modely používají shodné zápasy a časové bloky. Tento laboratorní test nemění nastavení modelu PRO.')
 
     st.subheader('Individuální brankáři – v1.1 beta')
@@ -452,7 +481,6 @@ if d is not None and mode=='NHL API':
                     summary,detail,n=st.session_state['goalie11_result']
                     st.write(f'Společný vzorek před trénovacím obdobím: {n} zápasů.')
                     st.dataframe(summary,hide_index=True)
-                    st.download_button('Stáhnout souhrn brankářů CSV',summary.to_csv(index=False),file_name='goalie_summary.csv')
-                    st.download_button('Stáhnout detail brankářů CSV',detail.to_csv(index=False),file_name='goalie_detail.csv')
+                    download_results('Stáhnout oba výsledky brankářů (ZIP)', 'goalie_results.zip', ('goalie_summary.csv',summary), ('goalie_detail.csv',detail))
                     st.caption('Párový chronologický test v0.8 proti v1.1. Neověřuje skutečné potvrzené startéry ani přímo adaptivní model v0.7 pro góly.')
         except Exception as e: st.error('Brankářská data: '+str(e))
