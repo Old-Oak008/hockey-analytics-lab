@@ -52,7 +52,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.6 • Historical Data Engine • Poisson • výsledky po 60 minutách')
+st.caption('v0.7 • Dynamic Analytics Engine • Poisson • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
 elh_fixtures=[]
@@ -252,3 +252,22 @@ if d is not None:
             st.dataframe(report,hide_index=True)
             st.download_button('Stáhnout výsledky testu CSV',report.to_csv(index=False),file_name='sezonni_test.csv')
         except Exception as e: st.error(str(e))
+
+if d is not None:
+    st.subheader('Dynamická validační laboratoř')
+    st.caption('Přeučení každých 14 dní. Poločasy 30, 60, 90, 180 a 365 dní; kombinace s ligovým průměrem 0/50/100 %. Parametry pro 1X2 a góly vybíráme odděleně jen podle dřívějších predikcí. Živé predikce se nemění.')
+    dynamic_data=history[history.date<pd.Timestamp(cutoff)]
+    dynamic_key=(mode,str(cutoff),len(dynamic_data),int(pd.util.hash_pandas_object(dynamic_data,index=False).sum()))
+    if st.button('Spustit dynamický test'):
+        try:
+            from dynamic import dynamic_test
+            with st.spinner('Přeučuji modely a testuji historické bloky…'):
+                st.session_state['dynamic_report']=dynamic_test(dynamic_data)
+                st.session_state['dynamic_key']=dynamic_key
+        except Exception as e: st.error(str(e))
+    if st.session_state.get('dynamic_key')==dynamic_key:
+        summary,detail=st.session_state['dynamic_report']
+        st.dataframe(summary,hide_index=True)
+        st.download_button('Stáhnout dynamický souhrn CSV',summary.to_csv(index=False),file_name='dynamicky_test.csv')
+        st.download_button('Stáhnout jednotlivé predikce CSV',detail.to_csv(index=False),file_name='dynamicke_predikce.csv')
+        st.caption('Retrospektivní vývojový test, nikoli nový nezávislý důkaz přesnosti. Nižší Brier a Log Loss jsou lepší.')
