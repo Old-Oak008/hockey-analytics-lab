@@ -52,9 +52,11 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v0.9 • Advanced Statistics Beta • Poisson • výsledky po 60 minutách')
+st.caption('v1.0 • PRO beta • výsledky po 60 minutách')
 mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
 d=None
+mp=None
+pro=False
 elh_fixtures=[]
 if mode=='NHL API':
     year=date.today().year-(date.today().month<7)
@@ -134,7 +136,7 @@ elif d is not None and not d.empty:
             st.caption('Starší sezony extraligy přidej výše pomocí CSV z oprávněného zdroje. Automatický archiv zatím není dostupný.')
         st.dataframe(history.assign(Sezona=season_year(history.date)).groupby('Sezona').size().rename('Zápasů').reset_index(),hide_index=True)
         st.download_button('Export historických dat CSV',history.to_csv(index=False),file_name='historie.csv')
-        st.caption('Historie pro sezonní test. Živý model NHL nadále používá vybranou sezonu.')
+        st.caption('Historie pro sezonní test a modely PRO. Základní Poisson používá vybranou sezonu.')
     teams=sorted(set(d.home)|set(d.away))
     cutoff=st.date_input('Datum predikce (datum zápasu dle zdroje)',date.today())
     past=d[d.date<pd.Timestamp(cutoff)]
@@ -159,7 +161,24 @@ elif d is not None and not d.empty:
         fixtures=[(h,a) for day,h,a in elh_fixtures if day==cutoff.isoformat() and h in teams and a in teams]
         if fixtures: game=st.selectbox('Zápasy extraligy (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
         else: st.caption('Pro vybraný den nejsou v rozpisu dostupné zápasy.')
-    if fixtures and st.checkbox("Přehled všech zápasů dne"):
+    if mode=='NHL API':
+        st.subheader('Model PRO – NHL')
+        pro=st.checkbox('Použít modely PRO (v0.8 výsledek / v0.7 góly)',value=True)
+        st.caption('Výběr modelů podle dosavadní retrospektivní validace. Nové zápasy teprve ověří skutečný přínos. Experimentální Elo platí jen pro základní režim.')
+        mp=st.file_uploader('MoneyPuck týmové statistiky (CSV nebo ZIP)',type=['csv','zip'],key='mp08')
+        st.markdown('[MoneyPuck.com – týmová data](https://www.moneypuck.com/data.htm) · nekomerční použití. Bez aktuálního souboru lze použít náhradní v0.7 pro 1X2.')
+        @st.cache_data(ttl=3600,show_spinner=False,max_entries=4)
+        def dyn_live(hist,day,pairs):
+            from hybrid import dynamic_forecast
+            return dynamic_forecast(hist,day,pairs)
+        @st.cache_data(ttl=3600,show_spinner=False,max_entries=4)
+        def adv_live(hist,raw,name,day,pairs):
+            import io
+            from advanced import read_stats
+            from hybrid import advanced_forecast
+            f=io.BytesIO(raw); f.name=name
+            return advanced_forecast(hist,read_stats(f),day,pairs)
+    if fixtures and st.checkbox("Přehled všech zápasů dne (základní model)"):
         rows=[]
         for ht,at in fixtures:
             try:
@@ -176,14 +195,45 @@ elif d is not None and not d.empty:
 else: st.stop()
 if h==a: st.error('Vyber dva různé týmy.'); st.stop()
 p,totals,scores=predict(lh,la)
+model_1x2=model_goals='Základní Poisson / Elo' if d is not None and experimental else 'Základní Poisson'
+pro_active=False
+if pro:
+    try:
+        # Compute all fixtures plus selected pair in one cached run.
+        pairs=tuple(sorted(set(fixtures+[(h,a)])))
+        hist=history[history.date<pd.Timestamp(cutoff)]
+        with st.spinner('Připravuji model PRO z dřívějších zápasů…'):
+            dyn=dyn_live(hist,str(cutoff),pairs)
+            adv=None
+            if mp is not None:
+                try: adv=adv_live(hist,mp.getvalue(),mp.name,str(cutoff),pairs)
+                except Exception as e: st.warning('v0.8 není dostupná: '+str(e))
+        i=pairs.index((h,a)); p=dyn['p'][i].tolist()
+        model_1x2='v0.7 adaptivní (náhradní)'
+        if adv is not None and (h,a) in adv['p']:
+            p=adv['p'][h,a].tolist(); model_1x2='v0.8 xG + střely + odpočinek'
+        else: st.info('Pro tento zápas chybí použitelné aktuální xG. Výsledek počítá náhradní model v0.7.')
+        totals=list(zip((4.5,5.5,6.5),dyn['q'][i].tolist())); model_goals='v0.7 adaptivní'; pro_active=True
+        st.caption(f"Gólový model: {dyn['n']} trénovacích zápasů, uzavřená historie do {dyn['train_end']}; poločas {dyn['kg'][0]} dní, váha regrese {dyn['kg'][1]:.0%}.")
+        if adv is not None: st.caption(f"xG model: {adv['n']} trénovacích zápasů, historie do {adv['train_end']}, MoneyPuck do {adv['stats_end']}.")
+        if fixtures:
+            with st.expander('PRO – všechny zápasy dne'):
+                batch=[]
+                for ht,at in fixtures:
+                    j=pairs.index((ht,at)); has_xg=adv is not None and (ht,at) in adv['p']; probs=adv['p'][(ht,at)] if has_xg else dyn['p'][j]
+                    batch.append([ht+' – '+at,*[f'{v:.1%}' for v in probs],*[f'{v:.1%}' for v in dyn['q'][j]],'v0.8' if has_xg else 'v0.7'])
+                st.dataframe(pd.DataFrame(batch,columns=['Zápas','1','X','2','O4.5','O5.5','O6.5','1X2 model']),hide_index=True)
+    except Exception as e: st.warning('PRO není dostupné, zobrazuji původní model: '+str(e))
 st.subheader(f'{h} – {a}')
+st.caption(f"1X2: {model_1x2} | góly: {model_goals}")
 st.dataframe(pd.DataFrame([[n,f'{v:.1%}',f'{1/v:.2f}' if v else '—'] for n,v in zip(['Domácí','Remíza','Hosté'],p)],columns=['Výsledek','Šance','Férový kurz']),hide_index=True,use_container_width=True)
 if d is not None:
     st.caption(f'Elo po 60 minutách: {h} {ratings.get(h,1500):.0f} | {a} {ratings.get(a,1500):.0f}')
 with st.expander('Vítěz včetně prodloužení – orientační scénář'):
     st.write(f'{h}: {p[0]+p[1]/2:.1%} | {a}: {p[2]+p[1]/2:.1%}')
     st.caption('Remízy rozděleny 50/50; nejde o naučený model prodloužení ani nájezdů.')
-st.write(f'Očekávané góly: {lh:.2f} + {la:.2f} = {lh+la:.2f}')
+if not pro_active: st.write(f'Očekávané góly: {lh:.2f} + {la:.2f} = {lh+la:.2f}')
+else: st.caption('Modely 1X2 a Over/Under jsou samostatné; nevytvářejí společné rozdělení skóre ani jednoznačný průměr gólů.')
 rows=[]; candidates=[]
 for k,v in totals:
     for name,q in [('Over',v),('Under',1-v)]:
@@ -205,8 +255,39 @@ if d is not None:
 with st.expander('Potvrzení brankáři (poznámka)'):
     st.text_input('Brankář domácích',key='goalie_home'); st.text_input('Brankář hostů',key='goalie_away')
     st.caption('Jména jsou pouze poznámka; bez ověřených statistik nemění pravděpodobnosti.')
-st.subheader('Nejpravděpodobnější skóre'); st.dataframe(pd.DataFrame([(f'{i}:{j}',f'{v:.1%}') for i,j,v in scores],columns=['Skóre','Pravděpodobnost']),hide_index=True,use_container_width=True)
-st.caption('Nezávislý Poisson; domácí/venkovní síla s vyhlazením 8 ligovými zápasy. Volitelné experimentální Elo + forma. Bez kalibrace brankářů, sestav a prodloužení. Férový kurz není doporučení k sázce.')
+if not pro_active:
+    st.subheader('Nejpravděpodobnější skóre'); st.dataframe(pd.DataFrame([(f'{i}:{j}',f'{v:.1%}') for i,j,v in scores],columns=['Skóre','Pravděpodobnost']),hide_index=True,use_container_width=True)
+if not pro_active: st.caption('Nezávislý Poisson; domácí/venkovní síla s vyhlazením 8 ligovými zápasy. Volitelné experimentální Elo + forma.')
+st.caption('Bez kalibrace brankářů, sestav a prodloužení. Férový kurz není doporučení k sázce.')
+if d is not None and mode=='NHL API':
+    from datetime import datetime, timezone
+    st.subheader('Export predikce')
+    st.caption('CSV si ulož do Souborů nebo na Disk. Cloudové uložení není trvalé. Export zaznamenává skutečný čas vytvoření a modely; starší nebo rozehrané zápasy nelze považovat za předzápasový test.')
+    if st.button('Připravit záznam predikce'):
+        now=datetime.now(timezone.utc); status='neověřený scénář'
+        try:
+            payload=get('/schedule/'+cutoff.isoformat()); matches=[g for w in payload['gameWeek'] for g in w['games'] if g.get('gameDate',w['date'])==cutoff.isoformat() and g['homeTeam']['abbrev']==h and g['awayTeam']['abbrev']==a and g.get('gameType')==2]
+            if len(matches)==1 and matches[0].get('gameState') in ('FUT','PRE') and pd.Timestamp(matches[0]['startTimeUTC'])>pd.Timestamp(now): status='předzápasová (API ověřeno)'
+        except Exception: pass
+        rec={'created_utc':now.isoformat(),'date':cutoff.isoformat(),'home':h,'away':a,'status':status,'model_1x2':model_1x2,'model_goals':model_goals,'p1':p[0],'px':p[1],'p2':p[2],**{f'over_{k}':v for k,v in totals}}
+        st.session_state['pro_export']=(cutoff,h,a,model_1x2,model_goals,tuple(p),tuple(totals),pd.DataFrame([rec]).to_csv(index=False),status)
+    rec=st.session_state.get('pro_export')
+    if rec and rec[:7]==(cutoff,h,a,model_1x2,model_goals,tuple(p),tuple(totals)):
+        st.caption(rec[8]); st.download_button('Stáhnout záznam predikce CSV',rec[7],file_name=f'predikce_{cutoff}_{h}_{a}.csv')
+    with st.expander('Vyhodnocení uložených předzápasových predikcí'):
+        saved=st.file_uploader('Nahraj dříve uložené CSV predikcí',type='csv',accept_multiple_files=True,key='archive10')
+        if saved:
+            try:
+                from hybrid import score_archive
+                result,detail,matched,pending=score_archive(pd.concat([pd.read_csv(f) for f in saved],ignore_index=True),history,date.today())
+                st.write(f'Vyhodnocené záznamy: {matched}; bez výsledku v načtené historii: {pending}.')
+                if result.empty: st.info('Zatím žádné dokončené ověřené předzápasové predikce. Aktualizuj výsledky NHL.')
+                else:
+                    st.dataframe(result,hide_index=True)
+                    st.download_button('Stáhnout vyhodnocení CSV',detail.to_csv(index=False),file_name='pro_vyhodnoceni.csv')
+                st.caption('Vyhodnocení pouze po 60 minutách. První záznam pro kombinaci modelů a zápas; ruční CSV není nezměnitelný auditní log.')
+            except Exception as e: st.error(str(e))
+
 if d is not None and st.button('Porovnat modely na historii (walk-forward)'):
     try:
         with st.spinner('Probíhá test...'): result=compare(past)
@@ -233,7 +314,7 @@ if d is not None:
         st.write('Kontrola kalibrace laděného modelu (Over)')
         st.dataframe(cal,hide_index=True)
         st.caption('Nižší Brier a Log Loss jsou lepší. Malé skupiny jsou nespolehlivé. Opakovaný výběr podle tohoto testu vyžaduje nový nezávislý test.')
-    with st.expander('Monte Carlo – kontrola numerické nejistoty'):
+    with st.expander('Monte Carlo – kontrola základního Poissonova modelu'):
         if st.button('100 000 simulací'):
             import numpy as np
             rng=np.random.default_rng(42); x=rng.poisson(lh,100000); y=rng.poisson(la,100000)
@@ -255,7 +336,7 @@ if d is not None:
 
 if d is not None:
     st.subheader('Dynamická validační laboratoř')
-    st.caption('Přeučení každých 14 dní. Poločasy 30, 60, 90, 180 a 365 dní; kombinace s ligovým průměrem 0/50/100 %. Parametry pro 1X2 a góly vybíráme odděleně jen podle dřívějších predikcí. Živé predikce se nemění.')
+    st.caption('Přeučení každých 14 dní. Poločasy 30, 60, 90, 180 a 365 dní; kombinace s ligovým průměrem 0/50/100 %. Parametry pro 1X2 a góly vybíráme odděleně jen podle dřívějších predikcí. Tento laboratorní test nemění nastavení modelu PRO.')
     dynamic_data=history[history.date<pd.Timestamp(cutoff)]
     dynamic_key=(mode,str(cutoff),len(dynamic_data),int(pd.util.hash_pandas_object(dynamic_data,index=False).sum()))
     if st.button('Spustit dynamický test'):
@@ -275,8 +356,8 @@ if d is not None:
 if d is not None and mode=='NHL API':
     st.subheader('Pokročilé statistiky NHL – v0.8 beta')
     st.markdown('Zdroj: [MoneyPuck.com](https://www.moneypuck.com/data.htm). Stáhni soubor **all game level data for all teams for all seasons** a nahraj jej níže. Pouze nekomerční použití.')
-    st.caption('Model využívá průměry xG, střel pro a proti z posledních 15 utkání a dny odpočinku. Žádná statistika právě predikovaného dne se nepoužívá. Živé predikce zůstávají beze změny.')
-    mp=st.file_uploader('MoneyPuck týmové statistiky (CSV nebo ZIP)',type=['csv','zip'],key='mp08')
+    st.caption('Model využívá průměry xG, střel pro a proti z posledních 15 utkání a dny odpočinku. Žádná statistika právě predikovaného dne se nepoužívá. Tento laboratorní test nemění nastavení modelu PRO.')
+    st.caption('Používá soubor MoneyPuck nahraný výše v sekci PRO.')
     if mp is not None:
         import hashlib
         mp_key=(hashlib.sha256(mp.getbuffer()).hexdigest(),str(cutoff),int(pd.util.hash_pandas_object(history,index=False).sum()))
@@ -314,4 +395,4 @@ if d is not None and mode=='NHL API':
         st.dataframe(summary,hide_index=True)
         st.download_button('Stáhnout souhrn v0.9 CSV',summary.to_csv(index=False),file_name='special_summary.csv')
         st.download_button('Stáhnout detail v0.9 CSV',detail.to_csv(index=False),file_name='special_detail.csv')
-        st.caption('Všechny tři modely používají shodné zápasy a časové bloky. Živé predikce se nemění.')
+        st.caption('Všechny tři modely používají shodné zápasy a časové bloky. Tento laboratorní test nemění nastavení modelu PRO.')
