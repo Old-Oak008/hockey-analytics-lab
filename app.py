@@ -109,7 +109,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.13 • Czech History Beta • týmové výsledky po 60 minutách')
+st.caption('v1.14 • European History Beta • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -259,42 +259,60 @@ if page=='Archiv predikcí':
 
     st.stop()
 
-def czech_history_panel():
+def european_history_panel():
     from czechhistory import leagues as api_leagues, games as api_games, groups as api_groups, convert as api_convert
     from io import BytesIO
-    with st.expander('České historické výsledky – API-Hockey (beta)',expanded=False):
+    with st.expander('Evropské historické výsledky – API-Hockey (beta)',expanded=False):
         st.markdown('Zdroj: [API-Hockey / API-SPORTS](https://api-sports.io/sports/hockey). [Podmínky](https://api-sports.io/terms). Bezplatný tarif má omezené sezony a 100 požadavků denně. Žádný placený tarif není nutný pro zkoušku.')
         st.caption('Používej vlastní klíč a pouze data, která smíš využívat pro osobní analýzu. Nezveřejňuj klíč ani získanou databázi. Import je soukromý v rámci této návštěvy, bez sdílené cache. Klíč není v záloze.')
         key=st.text_input('Vlastní API-Hockey klíč',type='password',key='api113_key')
-        if st.button('Vyhledat české soutěže',key='api113_find'):
+        countries={
+            'Česko':('Czech-Republic',{'extraliga':'elhapi','tipsport extraliga':'elhapi','chance liga':'maxaapi','maxa liga':'maxaapi','wsm liga':'maxaapi','1. liga':'maxaapi','1 liga':'maxaapi'}),
+            'Švédsko':('Sweden',{'shl':'shl'}),
+            'Finsko':('Finland',{'liiga':'liiga'}),
+            'Velká Británie':('United-Kingdom',{'elite league':'eihl','eihl':'eihl'}),
+            'Švýcarsko':('Switzerland',{'national league':'nl'}),
+            'Německo':('Germany',{'del':'del'}),
+        }
+        country_name=st.selectbox('Země',list(countries),key='api114_country')
+        country,aliases=countries[country_name]
+        catalog=st.session_state.setdefault('api114_catalog',{})
+        if country=='Czech-Republic' and country not in catalog and st.session_state.get('api113_leagues'):
+            catalog[country]=st.session_state['api113_leagues']
+        if st.button('Vyhledat soutěže ve vybrané zemi',key='api114_find'):
             try:
                 with st.spinner('Načítám nabídku…'):
-                    options=api_leagues('Czech-Republic',key)
-                st.session_state['api113_leagues']=options
-                if not options: st.warning('Zdroj nevrátil žádné české soutěže.')
+                    options=api_leagues(country,key)
+                catalog[country]=options
+                if not options: st.warning('Zdroj nevrátil žádné soutěže.')
             except ValueError as e: st.error(str(e))
-        options=st.session_state.get('api113_leagues',[])
+        options=catalog.get(country,[])
         if not options: return
-        # Only explicit recognized competitions may be stored in the named slots.
-        aliases={'extraliga':'elhapi','tipsport extraliga':'elhapi','chance liga':'maxaapi','maxa liga':'maxaapi','wsm liga':'maxaapi','1. liga':'maxaapi','1 liga':'maxaapi'}
         lookup={x['id']:x for x in options if x['name'].strip().lower() in aliases}
         if not lookup:
-            st.warning('V seznamu se nepodařilo bezpečně rozpoznat extraligu ani druhou ligu.')
+            st.warning('V seznamu se nepodařilo bezpečně rozpoznat požadovanou soutěž.')
             st.write([x['name'] for x in options]); return
-        lid=st.selectbox('Soutěž v API',list(lookup),format_func=lambda i:f"{lookup[i]['name']} (ID {i})",key='api113_league')
+        lid=st.selectbox('Soutěž v API',list(lookup),format_func=lambda i:f"{lookup[i]['name']} (ID {i})",key='api114_league_'+country)
         info=lookup[lid]; slot='eu18_'+aliases[info['name'].strip().lower()]
+        destination=next(name for name,code in LEAGUES.items() if 'eu18_'+code==slot)
+        st.caption('Cílová databáze v Analýze zápasu: '+destination)
+        if sum(aliases[x['name'].strip().lower()]==aliases[info['name'].strip().lower()] for x in lookup.values())>1:
+            st.warning('API nabízí více názvů/ID pro tuto soutěž. Vyber správné ID a sezonu. Historie různých ID se automaticky neslučuje.')
         current=date.today().year-(date.today().month<7)
         years=[y for y in info['years'] if current-4<=y<=current]
         if not years:
             st.warning('Zdroj neuvádí žádnou z posledních pěti sezon.'); return
-        chosen=st.multiselect('Sezony k načtení',years,default=years,format_func=lambda y:f'{y}/{str(y+1)[-2:]}',key=f'api113_years_{lid}')
+        chosen=st.multiselect('Sezony k načtení',years,default=years[:1],format_func=lambda y:f'{y}/{str(y+1)[-2:]}',key=f'api113_years_{lid}')
         st.caption('Zobrazené sezony nemusí být zahrnuté ve tvém tarifu. Každá vybraná sezona obvykle znamená jeden požadavek.')
         bank=st.session_state.setdefault('api113_records',{})
+        force=st.checkbox('Znovu stáhnout již načtené starší sezony',value=False,key='api114_force_'+str(lid))
         if st.button('Načíst vybrané sezony',key='api113_fetch',disabled=not bool(chosen)):
             if not key.strip(): st.error('Zadej vlastní API klíč.')
             else:
                 records=bank.setdefault(lid,{})
                 for y in chosen:
+                    if y<current and y in records and not force:
+                        st.info(f'{y}: použita historie z této návštěvy, bez požadavku na API.'); continue
                     try:
                         with st.spinner(f'Načítám {y}/{str(y+1)[-2:]}…'):
                             rows=api_games(lid,y,key)
@@ -314,7 +332,7 @@ def czech_history_panel():
         regular=[x for x in categories if x.lower() in ('fáze: regular season','fáze: regular','fáze: základní část','kolo: regular season')]
         selected=st.multiselect('Vyber pouze základní část',sorted(categories),default=regular,key=f'api113_stages_{lid}_{"_".join(map(str,sorted(subset)))}')
         st.caption('Pokud zdroj fázi neoznačuje, ověř ji v rozpisu soutěže. Play-off, baráž a přípravu nezahrnuj.')
-        verified=st.checkbox('Ověřil jsem, že vybrané skupiny patří pouze do základní části',key=f'api113_verified_{lid}')
+        verified=st.checkbox('Ověřil jsem, že vybrané skupiny patří pouze do základní části',key=f'api114_verified_{lid}_{repr(sorted(subset))}_{repr(sorted(selected))}')
         if not selected: return
         try:
             df,counts=api_convert(subset,lid,selected)
@@ -329,12 +347,15 @@ def czech_history_panel():
                 st.dataframe(hist.assign(Sezona=season_start).groupby('Sezona').size().rename('Zápasů').reset_index(),hide_index=True)
             if hist.empty: return
             if counts.get('Neplatný nebo chybějící údaj',0): st.warning('Některé záznamy byly vynechány. Historie nemusí být úplná.')
-            if st.session_state.get(slot): st.warning('Použitím nahradíš dosavadní historii tohoto samostatného API režimu. Běžná extraliga / Maxa liga zůstává beze změny.')
-            if st.button('Použít ověřené výsledky v analýze',key='api113_apply',disabled=not verified):
+            replace_ok=True
+            if st.session_state.get(slot):
+                st.warning('Použitím nahradíš dosavadní historii cílové databáze, včetně ručně nahraných sezon. Předem si stáhni zálohu. Ostatní soutěže zůstanou beze změny.')
+                replace_ok=st.checkbox('Chci nahradit historii: '+destination,key=f'api114_replace_{lid}_{repr(sorted(subset))}_{repr(sorted(selected))}')
+            if st.button('Použít ověřené výsledky v analýze',key='api113_apply',disabled=not (verified and replace_ok)):
                 st.session_state[slot]=((f'api_hockey_{lid}_historie.csv',raw),)
                 st.session_state[slot+'_generation']=st.session_state.get(slot+'_generation',0)+1
                 st.session_state.pop('hub_zip14',None)
-                st.success('Historie uložena pro tuto návštěvu. Vyber v Analýze zápasu odpovídající soutěž s označením API historie. Pro další návštěvu připrav novou zálohu.')
+                st.success('Historie uložena pro tuto návštěvu. Vyber v Analýze zápasu cílovou soutěž uvedenou výše. Pro další návštěvu připrav novou zálohu.')
             if verified: download_file('Stáhnout převedenou historii CSV',raw,file_name=f'api_hockey_{lid}_historie.csv',mime='text/csv')
         except (ValueError,TypeError,KeyError) as e: st.error('Historii nelze bezpečně zpracovat: '+str(e))
 
@@ -373,7 +394,7 @@ if page=='Datové centrum':
     session_upload('Starší sezony extraligy z oprávněného zdroje','extra_elh14_session',multiple=True,types=['csv'])
     st.caption('Vlastní CSV: date,home,away,hg,ag; skóre po 60 minutách. V rámci jednoho pole nemíchej soutěže.')
     st.subheader('Evropské soutěže')
-    czech_history_panel()
+    european_history_panel()
     st.caption('Každá liga má samostatnou historii; v záloze se uchovají všechny nahrané ligy. Používej pouze oprávněně získané výsledky základní části po 60 minutách. Prázdné hg a ag označují rozpis, nikoliv 0:0.')
     eu_choice=st.selectbox('Evropská soutěž',list(LEAGUES),key='eu_hub18')
     eu_files=european_upload(eu_choice)
@@ -654,7 +675,7 @@ elif mode=='Tipsport extraliga':
     else: st.info('Klikni na stažení dat. Při chybě lze využít vlastní CSV.')
 elif mode in LEAGUES:
     standings_panel(mode)
-    st.caption('Samostatná historie '+mode+'. Automatický import výsledků této ligy zatím není ověřen; nahraj vlastní oprávněné CSV. Rozpis lze přidat v témže souboru s oběma skóre prázdnými.')
+    st.caption('Samostatná historie '+mode+'. Historii lze načíst přes API-Hockey v Datovém centru (podle tarifu) nebo nahrát vlastní oprávněné CSV. Rozpis lze přidat v témže souboru s oběma skóre prázdnými.')
     ef=european_upload(mode)
     if ef:
         try:
