@@ -6,7 +6,7 @@ import pandas as pd
 import requests
 from model import validate
 
-LEAGUES={'Maxa liga':'maxa','SHL (Švédsko)':'shl','Liiga (Finsko)':'liiga','EIHL (Velká Británie)':'eihl','National League (Švýcarsko)':'nl','DEL (Německo)':'del'}
+LEAGUES={'Tipsport extraliga (API historie)':'elhapi','Maxa liga (API historie)':'maxaapi','Maxa liga':'maxa','SHL (Švédsko)':'shl','Liiga (Finsko)':'liiga','EIHL (Velká Británie)':'eihl','National League (Švýcarsko)':'nl','DEL (Německo)':'del'}
 SLOTS=tuple('eu18_'+v for v in LEAGUES.values())
 TABLE_URLS={'Maxa liga':'https://sazkyweb.cz/data/maxa-liga-tabulka.json','Tipsport extraliga':'https://sazkyweb.cz/data/extraliga-tabulka.json'}
 COLS=['date','home','away','hg','ag']
