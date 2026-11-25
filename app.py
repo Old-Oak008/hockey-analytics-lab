@@ -105,7 +105,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.4 • Data Center • týmové výsledky po 60 minutách')
+st.caption('v1.5 • Player Intelligence • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 import os
@@ -205,6 +205,62 @@ if page=='Datové centrum':
     st.stop()
 
 if page=='Hráči NHL':
+    player_mode=st.radio('Typ analýzy hráčů',['Celý zápas','Jednotlivý hráč'],horizontal=True,key='player_mode15')
+    if player_mode=='Celý zápas':
+        from playerbatch import fixtures_for_day, batch
+        from players import TEAMS, season_start
+        import time
+        st.subheader('Hráči obou týmů – hromadná analýza')
+        st.caption('Pouze NHL, základní část. Zdroj: NHL API. Odhady platí, pouze pokud hráč nastoupí. Sezonní soupiska není potvrzenou sestavou. Výsledek početně zahrnuje prodloužení, nikoli nájezdy. Stejný model jako v1.2; vliv soupeře zatím není zahrnut.')
+        day=st.date_input('Datum zápasu (dle rozpisu NHL)',date.today(),key='batch_day15')
+        yy=season_start(day)
+        @st.cache_data(ttl=900,show_spinner=False,max_entries=24)
+        def batch_schedule(day): return fixtures_for_day(get('/schedule/'+day.isoformat()),day)
+        try:
+            games=batch_schedule(day)
+        except Exception as e:
+            games=[]; st.warning('Rozpis není dostupný: '+str(e))
+        game=st.selectbox('Zápas (domácí – hosté)',games+[None],format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x),key='batch_game15_'+str(day))
+        if game is None:
+            ts=TEAMS if yy>=2024 else sorted(set(TEAMS)-{'UTA'}|{'ARI'})
+            h=st.selectbox('Domácí',ts,key='batch_home15')
+            a=st.selectbox('Hosté',[t for t in ts if t!=h],key='batch_away15')
+        else: h,a=game
+        key=(str(day),h,a)
+        if st.button('Analyzovat hráče obou týmů',key='batch_run15'):
+            st.session_state.pop('batch_report15',None)
+            now=time.time()
+            cache=st.session_state.setdefault('batch_logs15',{})
+            cache={k:v for k,v in cache.items() if now-v[0]<1800}
+            existing={pid:v[1] for (year,pid),v in cache.items() if year==yy}
+            bar=st.progress(0.0,text='Načítám soupisky…')
+            try:
+                def progress(i,n): bar.progress(i/n,text=f'Zpracováno {i}/{n} hráčů')
+                rows,errors,fetched=batch(get,h,a,day,yy,existing,progress)
+                cache.update({(yy,pid):(time.time(),v) for pid,v in fetched.items()})
+                st.session_state['batch_logs15']=dict(sorted(cache.items(),key=lambda kv:kv[1][0])[-160:])
+                st.session_state['batch_report15']=(key,rows,errors)
+            except Exception as e: st.error('Hromadná analýza: '+str(e))
+            finally: bar.empty()
+        report=st.session_state.get('batch_report15')
+        if report and report[0]==key:
+            _,rows,errors=report
+            st.caption(f'Analyzováno: {len(rows)} | Vynecháno: {len(errors)} záznamů soupisky. Úspěšně načtené historie se v této návštěvě uchovávají až 30 minut.')
+            if rows.empty: st.warning('Není dostatek dostupných dat pro výpočet.')
+            else:
+                market=st.radio('Seřadit podle pravděpodobnosti',['Bod ANO','Bod NE','Gól ANO'],horizontal=True,key='batch_market15')
+                scope=st.radio('Zobrazit tým',['Oba týmy',h,a],horizontal=True,key='batch_scope15')
+                visible=rows if scope=='Oba týmy' else rows[rows['Tým']==scope]
+                visible=visible.sort_values([market,'Hráč'],ascending=[False,True])
+                st.dataframe(visible[['Tým','Hráč','Bod ANO','Bod NE','Gól ANO','Zápasy','Stav']].style.format({m:'{:.1%}' for m in ['Bod ANO','Bod NE','Gól ANO']}),hide_index=True)
+                with st.expander('Produktivita a čas na ledě'):
+                    st.dataframe(visible[['Tým','Hráč','Body/zápas L5','Body/zápas L10','Body/zápas L20','Čas na ledě L20 (min)','Poslední zápas']].style.format({m:'{:.2f}' for m in ['Body/zápas L5','Body/zápas L10','Body/zápas L20','Čas na ledě L20 (min)']}),hide_index=True)
+            if not errors.empty:
+                with st.expander('Vynechaní hráči a důvody'):
+                    st.dataframe(errors,hide_index=True)
+            metadata=pd.DataFrame([{'datum':str(day),'domaci':h,'hoste':a,'model':'v1.2 vyhlazena cetnost','podmineno_ucasti':True}])
+            download_results('Stáhnout celou analýzu (ZIP)',f'players_{day}_{h}_{a}.zip',('hraci.csv',rows),('vynechani.csv',errors),('informace.csv',metadata))
+        st.stop()
     from players import TEAMS,season_start,roster,logs,profile,backtest as player_test
     st.subheader('Hráči NHL – body a góly')
     st.caption('Zdroj: veřejné webové rozhraní NHL. Žádný soubor MoneyPuck ani týmová historie nejsou nutné. Predikce platí pouze za předpokladu, že hráč nastoupí. Body a góly včetně prodloužení, bez nájezdů.')
