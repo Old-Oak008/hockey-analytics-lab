@@ -109,7 +109,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.14.2 • European Import Fix • týmové výsledky po 60 minutách')
+st.caption('v1.14.3 • Score Import Fix • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub_v1142 import SLOTS, season_data, complete, build_backup, restore_backup
 from europe_v1142 import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -260,7 +260,7 @@ if page=='Archiv predikcí':
     st.stop()
 
 def european_history_panel():
-    from czechhistory import leagues as api_leagues, games as api_games, groups as api_groups, convert as api_convert
+    from czechhistory_v1143 import leagues as api_leagues, games as api_games, groups as api_groups, convert as api_convert
     from io import BytesIO
     with st.expander('Evropské historické výsledky – API-Hockey (beta)',expanded=False):
         st.markdown('Zdroj: [API-Hockey / API-SPORTS](https://api-sports.io/sports/hockey). [Podmínky](https://api-sports.io/terms). Bezplatný tarif má omezené sezony a 100 požadavků denně. Žádný placený tarif není nutný pro zkoušku.')
@@ -296,7 +296,7 @@ def european_history_panel():
         info=lookup[lid]; slot='eu18_'+aliases[info['name'].strip().lower()]
         destination=next((name for name,code in LEAGUES.items() if 'eu18_'+code==slot),None)
         if destination is None or slot not in SLOTS:
-            st.warning('Cílová databáze chybí. Zkontroluj, zda jsou nahrány všechny tři soubory v1.14.2. Žádná data nebyla změněna.')
+            st.warning('Cílová databáze chybí. Zkontroluj datové moduly v1.14.2 a novou aktualizaci v1.14.3. Žádná data nebyla změněna.')
             return
         st.caption('Cílová databáze v Analýze zápasu: '+destination)
         if st.session_state.get(slot):
@@ -351,9 +351,12 @@ def european_history_panel():
             df,counts=api_convert(subset,lid,selected)
             raw=df.to_csv(index=False).encode('utf-8')
             # Existing production reader must accept the converted format before activation.
+            st.dataframe(pd.DataFrame(sorted(counts.items()),columns=['Kontrola / důvod / metoda','Počet']),hide_index=True)
+            st.caption('Řádky Důvod a Metoda jsou podrobnosti, nikoli další zápasy.')
             if not df.empty: hist,fixtures=europe_history([BytesIO(raw)])
-            else: st.warning('Žádný použitelný zápas.'); return
-            st.dataframe(pd.DataFrame(sorted(counts.items()),columns=['Kontrola','Počet']),hide_index=True)
+            else: st.warning('Žádný použitelný zápas. Pošli snímek tabulky kontroly výše; není nutné znovu stahovat data v této návštěvě.'); return
+            if counts.get('Metoda: Konečné skóre + stav',0):
+                st.info('U části zápasů chybí úplné třetiny. Skóre po 60 minutách bylo odvozeno z konečného skóre a explicitního stavu FT/AOT/AP. Rozporné výsledky byly vynechány.')
             st.caption(f'{len(hist)} dokončených zápasů, {len(fixtures)-len(hist)} budoucích termínů. Počty sezon zkontroluj proti skutečnému rozpisu.')
             if not hist.empty:
                 season_start=hist.date.dt.year-(hist.date.dt.month<7).astype(int)
