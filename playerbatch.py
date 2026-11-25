@@ -1,11 +1,60 @@
 """NHL batch skater analysis. Probabilities conditional on participation.
 Reuses v1.2 probabilities unchanged; no opponent or confirmed lineup adjustment.
 """
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from email.utils import parsedate_to_datetime
 from requests import HTTPError
 import pandas as pd
 from players import roster, logs, before, probabilities
 
+
+
+class RateLimited(RuntimeError):
+    pass
+
+
+class PacedGet:
+    """Session-local response cache and conservative pacing. Stop on 429.
+    State survives Streamlit reruns; no requests are made during cooldown.
+    """
+    def __init__(self, get, state, interval=1.0, clock=time.time, sleep=time.sleep):
+        self.get, self.state, self.interval = get, state, interval
+        self.clock, self.sleep = clock, sleep
+        self.cache = state.setdefault('responses', {})
+
+    def __call__(self, path):
+        now = self.clock()
+        hit = self.cache.get(path)
+        if hit is not None and now-hit[0] < 1800:
+            return hit[1]
+        if now < self.state.get('blocked_until', 0):
+            raise RateLimited('429: limit NHL API; další pokus po skončení pauzy.')
+        delay = self.state.get('last_request', 0)+self.interval-now
+        if delay > 0:
+            self.sleep(delay)
+        self.state['last_request'] = self.clock()
+        try:
+            value = self.get(path)
+        except HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 429:
+                raise
+            now = self.clock()
+            header = exc.response.headers.get('Retry-After', '')
+            try:
+                wait = float(header)
+            except (TypeError, ValueError):
+                try: wait = parsedate_to_datetime(header).timestamp()-now
+                except (TypeError, ValueError, OverflowError): wait = 60
+            if not pd.notna(wait) or wait == float('inf'): wait = 60
+            self.state['blocked_until'] = now+max(60,wait)
+            raise RateLimited('429: limit NHL API; stahování pozastaveno.') from exc
+        # Only cache valid responses for the particular endpoint.
+        valid = isinstance(value,dict) and (isinstance(value.get('gameLog'),list) if '/game-log/' in path else any(isinstance(value.get(k),list) for k in ('forwards','defensemen')))
+        if valid:
+            self.cache[path] = (self.clock(), value)
+            if len(self.cache)>400:
+                oldest=min(self.cache,key=lambda k:self.cache[k][0]); del self.cache[oldest]
+        return value
 
 def fixtures_for_day(payload, day):
     target = pd.Timestamp(day).date().isoformat()
@@ -80,20 +129,23 @@ def batch(get, home, away, day, year, existing=None, progress=None, workers=4):
             return person,item,row,None
         except ValueError as exc:
             return person,item,None,str(exc)
-    with ThreadPoolExecutor(max_workers=max(1,min(4,workers))) as pool:
-        futures={pool.submit(process,p):p for p in people}
-        for i,future in enumerate(as_completed(futures),1):
-            team,pid,name=futures[future]
-            base={'Tým':team,'ID':pid,'Hráč':name}
-            try:
-                _,item,row,error=future.result()
-                # A missing season is retried on the next requested run, not cached.
-                if pid not in existing and not item[1]: fetched[pid]=item
-                if row is not None: rows.append({**base,**row})
-                else: issues.append({**base,'Důvod':error})
-            except Exception as exc:
-                issues.append({**base,'Důvod':str(exc)[:300]})
-            if progress is not None: progress(i,len(people))
+    limited=False
+    for i,person in enumerate(people,1):
+        team,pid,name=person
+        base={'Tým':team,'ID':pid,'Hráč':name}
+        try:
+            if limited and pid not in existing:
+                raise RateLimited('429: odloženo do dalšího pokusu.')
+            _,item,row,error=process(person)
+            if pid not in existing and not item[1]: fetched[pid]=item
+            if row is not None: rows.append({**base,**row})
+            else: issues.append({**base,'Důvod':error})
+        except RateLimited as exc:
+            limited=True
+            issues.append({**base,'Důvod':str(exc)})
+        except Exception as exc:
+            issues.append({**base,'Důvod':str(exc)[:300]})
+        if progress is not None: progress(i,len(people))
     result=pd.DataFrame(rows)
     if not result.empty: result=result.sort_values(['Tým','Hráč']).reset_index(drop=True)
     errors=pd.DataFrame(issues,columns=['Tým','ID','Hráč','Důvod'])

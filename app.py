@@ -105,7 +105,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.6 • Opponent Intelligence • týmové výsledky po 60 minutách')
+st.caption('v1.6.1 • Opponent Intelligence • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 import os
@@ -207,7 +207,7 @@ if page=='Datové centrum':
 if page=='Hráči NHL':
     player_mode=st.radio('Typ analýzy hráčů',['Celý zápas','Jednotlivý hráč'],horizontal=True,key='player_mode15')
     if player_mode=='Celý zápas':
-        from playerbatch import fixtures_for_day, batch
+        from playerbatch import fixtures_for_day, batch, PacedGet
         from players import TEAMS, season_start
         import time
         st.subheader('Hráči obou týmů – hromadná analýza')
@@ -227,8 +227,14 @@ if page=='Hráči NHL':
             a=st.selectbox('Hosté',[t for t in ts if t!=h],key='batch_away15')
         else: h,a=game
         key=(str(day),h,a)
-        if st.button('Analyzovat hráče obou týmů',key='batch_run15'):
-            st.session_state.pop('batch_report15',None)
+        api_state=st.session_state.setdefault('player_api161',{})
+        remaining=max(0,math.ceil(api_state.get('blocked_until',0)-time.time()))
+        if remaining:
+            st.warning(f'NHL API omezilo stahování. Další pokus nejdříve za {remaining} s. Úspěšně načtená data zůstanou v paměti; po pauze stiskni tlačítko znovu.')
+        if st.button('Analyzovat / doplnit chybějící hráče',key='batch_run15'):
+            if time.time()<api_state.get('blocked_until',0):
+                st.info('Pauza API ještě neskončila. Zkus tlačítko později.')
+                st.stop()
             st.session_state.pop('opponent_report16',None)
             now=time.time()
             cache=st.session_state.setdefault('batch_logs15',{})
@@ -237,7 +243,7 @@ if page=='Hráči NHL':
             bar=st.progress(0.0,text='Načítám soupisky…')
             try:
                 def progress(i,n): bar.progress(i/n,text=f'Zpracováno {i}/{n} hráčů')
-                rows,errors,fetched=batch(get,h,a,day,yy,existing,progress)
+                rows,errors,fetched=batch(PacedGet(get,api_state),h,a,day,yy,existing,progress)
                 cache.update({(yy,pid):(time.time(),v) for pid,v in fetched.items()})
                 st.session_state['batch_logs15']=dict(sorted(cache.items(),key=lambda kv:kv[1][0])[-160:])
                 st.session_state['batch_report15']=(key,rows,errors)
@@ -247,6 +253,8 @@ if page=='Hráči NHL':
         if report and report[0]==key:
             _,rows,errors=report
             st.caption(f'Analyzováno: {len(rows)} | Vynecháno: {len(errors)} záznamů soupisky. Úspěšně načtené historie se v této návštěvě uchovávají až 30 minut.')
+            incomplete=not errors.empty and errors['Důvod'].str.contains('429',regex=False).any()
+            if incomplete: st.warning('Neúplná analýza: NHL API omezilo požadavky. Po uplynutí pauzy znovu stiskni Analyzovat / doplnit chybějící hráče. Výsledky nereprezentují kompletní soupisky.')
             if rows.empty: st.warning('Není dostatek dostupných dat pro výpočet.')
             else:
                 market=st.radio('Seřadit podle pravděpodobnosti',['Bod ANO','Bod NE','Gól ANO'],horizontal=True,key='batch_market15')
@@ -262,7 +270,7 @@ if page=='Hráči NHL':
             if not rows.empty:
                 st.markdown('### Vliv soupeře – v1.6 experiment')
                 st.caption('Používá uloženou historii NHL, nikoli další soubory. Zohledňuje inkasované góly soupeře po 60 minutách; hráčské body a góly zahrnují i prodloužení. Základní predikce zůstávají nezměněné.')
-                if st.button('Spočítat a otestovat vliv soupeře',key='opp_run16'):
+                if st.button('Spočítat a otestovat vliv soupeře',key='opp_run16',disabled=incomplete):
                     st.session_state.pop('opponent_report16',None)
                     try:
                         from opponent import analyze as opponent_analyze
