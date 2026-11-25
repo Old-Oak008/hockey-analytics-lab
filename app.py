@@ -46,8 +46,12 @@ def session_upload(label, slot, multiple=False, types=None):
         value=st.session_state.get(widget)
         files=(value or []) if multiple else ([value] if value is not None else [])
         st.session_state[slot]=tuple((f.name,f.getvalue()) for f in files)
+        if slot=='mp12_session':
+            st.session_state.pop('fastpro_stats112',None); st.session_state.pop('fastpro_adv112',None)
     def forget():
         st.session_state.pop(slot,None)
+        if slot=='mp12_session':
+            st.session_state.pop('fastpro_stats112',None); st.session_state.pop('fastpro_adv112',None)
         st.session_state[slot+'_generation']=generation+1
     st.file_uploader(label,type=types or ['csv','zip'],accept_multiple_files=multiple,key=widget,on_change=remember)
     payload=st.session_state.get(slot,())
@@ -105,7 +109,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.11 • Result Tracking Beta • týmové výsledky po 60 minutách')
+st.caption('v1.12 • Performance Update • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -321,6 +325,7 @@ if page=='Datové centrum':
                 st.session_state[slot]=payload
                 st.session_state[slot+'_generation']=st.session_state.get(slot+'_generation',0)+1
             st.session_state.pop('hub_zip14',None)
+            st.session_state.pop('fastpro_stats112',None); st.session_state.pop('fastpro_adv112',None)
             st.success(f'Obnoveno {len(restored)} sezon NHL a {sum(map(len,uploads.values()))} nahraných souborů. Data jsou připravena v této návštěvě; starší data mimo zálohu zůstala zachována.')
             st.info('Přejdi do režimu Analýza zápasu. Obnovení stránky v Safari může ukončit relaci.')
         except Exception as e: st.error('Zálohu nelze obnovit: '+str(e))
@@ -666,16 +671,26 @@ elif d is not None and not d.empty:
         mp=session_upload('MoneyPuck týmové statistiky (CSV nebo ZIP)','mp12_session')
         st.markdown('[MoneyPuck.com – týmová data](https://www.moneypuck.com/data.htm) · nekomerční použití. Bez aktuálního souboru lze použít náhradní v0.7 pro 1X2.')
         @st.cache_data(ttl=3600,show_spinner=False,max_entries=4)
-        def dyn_live(hist,day,pairs):
-            from hybrid import dynamic_forecast
-            return dynamic_forecast(hist,day,pairs)
-        @st.cache_data(ttl=3600,show_spinner=False,max_entries=4)
+        def dyn_live(closed, boundary, teams):
+            from fastpro import dynamic_closed
+            return dynamic_closed(closed,boundary,teams)
         def adv_live(hist,raw,name,day,pairs):
-            import io
+            import io, hashlib
             from advanced import read_stats
-            from hybrid import advanced_forecast
-            f=io.BytesIO(raw); f.name=name
-            return advanced_forecast(hist,read_stats(f),day,pairs)
+            from fastpro import advanced_fast
+            digest=hashlib.sha256(raw).hexdigest()
+            key=(digest,name)
+            parsed=st.session_state.get('fastpro_stats112')
+            if parsed is None or parsed[0]!=key:
+                f=io.BytesIO(raw); f.name=name
+                parsed=(key,read_stats(f)); st.session_state['fastpro_stats112']=parsed
+            # One session-local result; do not retain uploaded stats in a new shared cache.
+            hkey=hashlib.sha256(pd.util.hash_pandas_object(hist,index=False).to_numpy().tobytes()).hexdigest()
+            result_key=(key,hkey,day,pairs)
+            prev=st.session_state.get('fastpro_adv112')
+            if prev is None or prev[0]!=result_key:
+                prev=(result_key,advanced_fast(hist,parsed[1],day,pairs)); st.session_state['fastpro_adv112']=prev
+            return prev[1]
     if fixtures and st.checkbox("Přehled všech zápasů dne (základní model)"):
         rows=[]
         for ht,at in fixtures:
@@ -699,11 +714,13 @@ model_1x2=model_goals='Základní Poisson / Elo' if d is not None and experiment
 pro_active=False
 if pro:
     try:
-        # Compute all fixtures plus selected pair in one cached run.
-        pairs=tuple(sorted(set(fixtures+[(h,a)])))
+        from fastpro import closed_history
         hist=history[history.date<pd.Timestamp(cutoff)]
+        closed,boundary=closed_history(hist,cutoff)
+        # Reuse the same training/predictions for every matchup in the active block.
         with st.spinner('Připravuji model PRO z dřívějších zápasů…'):
-            dyn=dyn_live(hist,str(cutoff),pairs)
+            dyn=dyn_live(closed,str(boundary.date()),tuple(teams))
+            pairs=dyn['pairs']
             adv=None
             if mp is not None:
                 try: adv=adv_live(hist,mp.getvalue(),mp.name,str(cutoff),pairs)
@@ -893,14 +910,21 @@ if d is not None:
 if d is not None:
     st.subheader('Sezonní test regrese')
     st.caption('Model se učí pouze ze starších sezon; parametry jsou v testované sezoně zmrazené. Poločas váhy historie 365 dní. Negativně binomické rozdělení pouze pro celkové góly.')
+    import hashlib
+    season_input=history[history.date<pd.Timestamp(cutoff)]
+    season_key=(mode,str(cutoff),hashlib.sha256(pd.util.hash_pandas_object(season_input,index=False).to_numpy().tobytes()).hexdigest())
     if st.button('Spustit sezonní test'):
         try:
             from history import season_test
             with st.spinner('Počítám regresi…'):
-                report=season_test(history[history.date<pd.Timestamp(cutoff)])
-            st.dataframe(report,hide_index=True)
-            download_file('Stáhnout výsledky testu CSV',report.to_csv(index=False),file_name='sezonni_test.csv')
-        except Exception as e: st.error(str(e))
+                report=season_test(season_input)
+            st.session_state['season_report112']=(season_key,report)
+        except Exception as e: st.session_state.pop('season_report112',None); st.error(str(e))
+    saved_season=st.session_state.get('season_report112')
+    if saved_season and saved_season[0]==season_key:
+        report=saved_season[1]
+        st.dataframe(report,hide_index=True)
+        download_file('Stáhnout výsledky testu CSV',report.to_csv(index=False),file_name='sezonni_test.csv')
 
 if d is not None:
     st.subheader('Dynamická validační laboratoř')
