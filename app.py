@@ -18,12 +18,12 @@ def result_zip(files):
     return out.getvalue()
 
 
-def download_file(label, data, file_name, mime=None):
+def download_file(label, data, file_name, mime=None, widget_key=None):
     # Streamlit >=1.43 supports browser-only downloads. Older supported
     # releases (>=1.40) can isolate the download in a fragment.
     import re
     version = tuple(map(int, re.match(r'(\d+)\.(\d+)', st.__version__).groups()))
-    kwargs = dict(file_name=file_name, key='download_' + file_name)
+    kwargs = dict(file_name=file_name, key=widget_key or 'download_' + file_name)
     if mime is not None:
         kwargs['mime'] = mime
     if version >= (1, 43):
@@ -45,18 +45,22 @@ def session_upload(label, slot, multiple=False, types=None):
     def remember():
         value=st.session_state.get(widget)
         files=(value or []) if multiple else ([value] if value is not None else [])
+        # An empty uploader is not an instruction to erase imported/restored data.
+        if not files: return
         st.session_state[slot]=tuple((f.name,f.getvalue()) for f in files)
+        st.session_state.pop('hub_zip14',None)
         if slot=='mp12_session':
             st.session_state.pop('fastpro_stats112',None); st.session_state.pop('fastpro_adv112',None)
     def forget():
         st.session_state.pop(slot,None)
+        st.session_state.pop('hub_zip14',None)
         if slot=='mp12_session':
             st.session_state.pop('fastpro_stats112',None); st.session_state.pop('fastpro_adv112',None)
         st.session_state[slot+'_generation']=generation+1
     st.file_uploader(label,type=types or ['csv','zip'],accept_multiple_files=multiple,key=widget,on_change=remember)
     payload=st.session_state.get(slot,())
     if payload:
-        st.caption('Uchováno pro tuto návštěvu: '+', '.join(name for name,_ in payload))
+        st.caption('Uchováno pro tuto návštěvu (smazání pouze tlačítkem Odebrat): '+', '.join(name for name,_ in payload))
         st.button('Odebrat uložená data',key=slot+'_clear',on_click=forget)
     streams=[]
     for name,raw in payload:
@@ -109,7 +113,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.14.3 • Score Import Fix • týmové výsledky po 60 minutách')
+st.caption('v1.14.4 • Data Recovery • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub_v1142 import SLOTS, season_data, complete, build_backup, restore_backup
 from europe_v1142 import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -148,7 +152,45 @@ def refresh_nhl(season, require_complete=False, force=False):
     finally:
         if os.path.exists(temp): os.unlink(temp)
     st.session_state.get('nhl14_restored',{}).pop(season,None)
+    st.session_state.pop('hub_zip14',None)
     return len(data),False
+
+def prepare_data_checkpoint():
+    """Snapshot every currently loaded database, not just the selected league."""
+    st.session_state.pop('hub_zip14',None)
+    seasons=set(st.session_state.get('nhl14_restored',{})) | {p.stem[4:] for p in Path('data').glob('nhl_*.csv')}
+    loaded={}
+    for ss in sorted(seasons):
+        raw=nhl_raw(ss)
+        if raw is not None:
+            season_data(raw,ss)
+            loaded[ss]=raw
+    slots={slot:st.session_state.get(slot,()) for slot in SLOTS}
+    result=build_backup(loaded,slots)
+    st.session_state['hub_zip14']=result
+    return len(loaded),sum(bool(v) for v in slots.values())
+
+
+def show_data_checkpoint(inline=False):
+    if 'hub_zip14' in st.session_state:
+        st.caption('ZIP obsahuje všechny databáze uložené při vytvoření zálohy. Ulož jej do Souborů na iPhonu nebo na Disk; aplikace ho sama do telefonu neuloží.')
+        download_file('Stáhnout kompletní zálohu dat (ZIP)',st.session_state['hub_zip14'],file_name='hockey_data_backup.zip',mime='application/zip',widget_key='hub_zip_inline1144' if inline else 'hub_zip_main1144')
+
+
+def restore_data_panel():
+    st.markdown('**Obnovit uložené databáze**')
+    restore=st.file_uploader('Obnovit vlastní zálohu ZIP',type='zip',key='hub_restore_file14')
+    if restore is not None and st.button('Obnovit data ze zálohy',key='hub_restore14'):
+        try:
+            restored,uploads=restore_backup(restore.getvalue())
+            st.session_state.setdefault('nhl14_restored',{}).update(restored)
+            for slot,payload in uploads.items():
+                st.session_state[slot]=payload
+                st.session_state[slot+'_generation']=st.session_state.get(slot+'_generation',0)+1
+            for k in ('hub_zip14','fastpro_stats112','fastpro_adv112'):
+                st.session_state.pop(k,None)
+            st.success(f'Obnoveno {len(restored)} sezon NHL a {sum(map(len,uploads.values()))} datových souborů. Ostatní data v této návštěvě zůstala zachována.')
+        except Exception as e: st.error('Zálohu nelze obnovit: '+str(e))
 
 def european_upload(league):
     return session_upload('Historie a případný rozpis – '+league+' (CSV)', 'eu18_'+LEAGUES[league], multiple=True, types=['csv'])
@@ -371,7 +413,14 @@ def european_history_panel():
                 st.session_state[slot]=((f'api_hockey_{lid}_historie.csv',raw),)
                 st.session_state[slot+'_generation']=st.session_state.get(slot+'_generation',0)+1
                 st.session_state.pop('hub_zip14',None)
-                st.success(f'Uloženo {len(hist)} zápasů do {destination}. Vyber tuto soutěž v Analýze zápasu. Pro další návštěvu připrav novou ZIP zálohu.')
+                st.success(f'Uloženo {len(hist)} zápasů do {destination} v této návštěvě.')
+                try:
+                    with st.spinner('Vytvářím společnou zálohu všech databází…'):
+                        ns,nd=prepare_data_checkpoint()
+                    st.success(f'Připravena společná záloha: {ns} sezon NHL a {nd} doplňkových databází. Stáhni ji před zavřením stránky.')
+                except Exception as e:
+                    st.error('Data jsou v této návštěvě, ale ZIP se nepodařilo vytvořit: '+str(e))
+            if st.session_state.get(slot): show_data_checkpoint(inline=True)
             if verified: download_file('Stáhnout převedenou historii CSV',raw,file_name=f'api_hockey_{lid}_historie.csv',mime='text/csv')
         except (ValueError,TypeError,KeyError) as e: st.error('Historii nelze bezpečně zpracovat: '+str(e))
 
@@ -379,6 +428,8 @@ def european_history_panel():
 if page=='Datové centrum':
     st.subheader('Datové centrum')
     st.caption('Aktualizuj NHL jediným tlačítkem. MoneyPuck můžeš nahrát nebo obnovit z vlastní zálohy. Cloudové soubory nejsou trvalé; zálohu si ulož do Souborů nebo na Disk.')
+    st.warning('Data MoneyPuck a evropských lig jsou v paměti aktuální návštěvy. Po obnovení stránky nebo restartu mohou zmizet. Po každém uložení evropské ligy se připraví nový společný ZIP; stáhni jej do telefonu.')
+    restore_data_panel()
     year=date.today().year-(date.today().month<7)
     seasons=[f'{y}{y+1}' for y in range(year,year-5,-1)]
     chosen=st.multiselect('Sezony NHL',seasons,default=seasons,key='hub_seasons14')
@@ -436,30 +487,16 @@ if page=='Datové centrum':
     st.dataframe(pd.DataFrame(overview,columns=['Soutěž','Uložené zápasy','Poslední výsledek','Stav']),hide_index=True)
     download_file('Šablona historie a rozpisu CSV','date,home,away,hg,ag\n',file_name='europe_template.csv')
     st.subheader('Jedna přenosná záloha')
-    st.caption('Obsahuje načtené NHL sezony a původní nahrané soubory. Neobsahuje predikce, výsledky testů ani automaticky stažený rozpis extraligy. Nezveřejňuj soubory MoneyPuck na GitHubu.')
+    st.caption('Obsahuje všechny aktuálně uložené NHL sezony a doplňkové databáze, včetně evropských lig. Neobsahuje predikce ani API klíče. Nezveřejňuj soubory MoneyPuck na GitHubu.')
     if st.button('Připravit jednu zálohu dat (ZIP)',key='hub_pack14'):
         try:
             with st.spinner('Baluji data…'):
-                st.session_state['hub_zip14']=build_backup(loaded,{s:st.session_state.get(s,()) for s in SLOTS})
-        except Exception as e: st.session_state.pop('hub_zip14',None); st.error(str(e))
-    if 'hub_zip14' in st.session_state:
-        st.caption('Záloha obsahuje data z okamžiku stisku Připravit. Po aktualizaci připrav novou.')
-        download_file('Stáhnout kompletní zálohu dat',st.session_state['hub_zip14'],file_name='hockey_data_backup.zip',mime='application/zip')
-        if st.button('Uvolnit připravenou zálohu z paměti',key='hub_free14'):
-            st.session_state.pop('hub_zip14',None); st.rerun()
-    restore=st.file_uploader('Obnovit vlastní zálohu ZIP',type='zip',key='hub_restore_file14')
-    if restore is not None and st.button('Obnovit data ze zálohy',key='hub_restore14'):
-        try:
-            restored,uploads=restore_backup(restore.getvalue())
-            st.session_state.setdefault('nhl14_restored',{}).update(restored)
-            for slot,payload in uploads.items():
-                st.session_state[slot]=payload
-                st.session_state[slot+'_generation']=st.session_state.get(slot+'_generation',0)+1
-            st.session_state.pop('hub_zip14',None)
-            st.session_state.pop('fastpro_stats112',None); st.session_state.pop('fastpro_adv112',None)
-            st.success(f'Obnoveno {len(restored)} sezon NHL a {sum(map(len,uploads.values()))} nahraných souborů. Data jsou připravena v této návštěvě; starší data mimo zálohu zůstala zachována.')
-            st.info('Přejdi do režimu Analýza zápasu. Obnovení stránky v Safari může ukončit relaci.')
-        except Exception as e: st.error('Zálohu nelze obnovit: '+str(e))
+                ns,nd=prepare_data_checkpoint()
+            st.success(f'Připraveno: {ns} sezon NHL a {nd} doplňkových databází.')
+        except Exception as e: st.error(str(e))
+    show_data_checkpoint()
+    if 'hub_zip14' in st.session_state and st.button('Uvolnit připravenou zálohu z paměti',key='hub_free14'):
+        st.session_state.pop('hub_zip14',None); st.rerun()
     st.stop()
 
 if page=='Hráči NHL':
