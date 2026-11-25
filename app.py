@@ -109,7 +109,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.14 • European History Beta • týmové výsledky po 60 minutách')
+st.caption('v1.14.1 • European History Fix • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -294,7 +294,10 @@ def european_history_panel():
             st.write([x['name'] for x in options]); return
         lid=st.selectbox('Soutěž v API',list(lookup),format_func=lambda i:f"{lookup[i]['name']} (ID {i})",key='api114_league_'+country)
         info=lookup[lid]; slot='eu18_'+aliases[info['name'].strip().lower()]
-        destination=next(name for name,code in LEAGUES.items() if 'eu18_'+code==slot)
+        destination=next((name for name,code in LEAGUES.items() if 'eu18_'+code==slot),None)
+        if destination is None or slot not in SLOTS:
+            st.warning('Cílová databáze pro tuto soutěž chybí. Aktualizuj europe.py a případně datahub.py. Žádná data nebyla změněna.')
+            return
         st.caption('Cílová databáze v Analýze zápasu: '+destination)
         if sum(aliases[x['name'].strip().lower()]==aliases[info['name'].strip().lower()] for x in lookup.values())>1:
             st.warning('API nabízí více názvů/ID pro tuto soutěž. Vyber správné ID a sezonu. Historie různých ID se automaticky neslučuje.')
