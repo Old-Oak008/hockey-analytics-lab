@@ -108,13 +108,19 @@ def analyze_player(data, day):
             'Stav':'Omezená historie' if len(past)<30 or age>21 else '30+ zápasů, aktuální'}
 
 
-def batch(get, home, away, day, year, existing=None, progress=None, workers=4):
+def batch(get, home, away, day, year, existing=None, progress=None, workers=4, selected_ids=None):
     """Return rows, excluded players and successful newly fetched raw logs.
     Caller controls cache lifetime. Workers never invoke UI or session state.
     """
     existing=existing or {}
     rows=[]; issues=[]; fetched={}
     people,duplicates=candidates(home,away,get(f'/roster/{home}/{year}{year+1}'),get(f'/roster/{away}/{year}{year+1}'))
+    if selected_ids is not None:
+        chosen=set(selected_ids)
+        people=[r for r in people if r[1] in chosen]
+        duplicates=[r for r in duplicates if r[1] in chosen]
+        missing=chosen-{r[1] for r in people+duplicates}
+        if missing: raise ValueError("Vybraná sestava se neshoduje s aktuální soupiskou. Načti soupisky znovu.")
     for team,pid,name in duplicates:
         issues.append({'Tým':team,'ID':pid,'Hráč':name,'Důvod':'Hráč je v obou sezonních soupiskách; vynechán.'})
     def process(person):

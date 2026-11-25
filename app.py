@@ -105,7 +105,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.8 • European Hockey Beta • týmové výsledky po 60 minutách')
+st.caption('v1.9 • Lineup Intelligence Beta • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -244,7 +244,8 @@ if page=='Datové centrum':
 if page=='Hráči NHL':
     player_mode=st.radio('Typ analýzy hráčů',['Celý zápas','Jednotlivý hráč'],horizontal=True,key='player_mode15')
     if player_mode=='Celý zápas':
-        from playerbatch import fixtures_for_day, batch, PacedGet
+        from playerbatch import fixtures_for_day, batch, PacedGet, candidates
+        from lineups import match_key, validate_selection, annotate
         from players import TEAMS, season_start
         import time
         st.subheader('Hráči obou týmů – hromadná analýza')
@@ -263,12 +264,55 @@ if page=='Hráči NHL':
             h=st.selectbox('Domácí',ts,key='batch_home15')
             a=st.selectbox('Hosté',[t for t in ts if t!=h],key='batch_away15')
         else: h,a=game
-        key=(str(day),h,a)
         api_state=st.session_state.setdefault('player_api161',{})
         remaining=max(0,math.ceil(api_state.get('blocked_until',0)-time.time()))
         if remaining:
             st.warning(f'NHL API omezilo stahování. Další pokus nejdříve za {remaining} s. Úspěšně načtená data zůstanou v paměti; po pauze stiskni tlačítko znovu.')
-        if st.button('Analyzovat / doplnit chybějící hráče',key='batch_run15'):
+        # Load only two roster endpoints before selecting which player logs to fetch.
+        match_id=match_key('NHL',day,h,a)
+        roster_key='lineup19_roster_'+match_id
+        selection_mode=st.radio('Rozsah hráčů',['Celá sezonní soupiska','Vlastní výběr ze sestavy'],horizontal=True,key='lineup19_mode')
+        selected_ids=None; roles={}; selection_ok=True
+        if selection_mode=='Vlastní výběr ze sestavy':
+            st.caption('Vyber skutečně nastupující hráče podle svého zdroje. Aplikace jejich účast sama nepotvrzuje; výběr nemění modelové pravděpodobnosti.')
+            if st.button('Načíst seznam hráčů obou týmů',key='lineup19_load'):
+                try:
+                    paced=PacedGet(get,api_state)
+                    people,duplicates=candidates(h,a,paced(f'/roster/{h}/{yy}{yy+1}'),paced(f'/roster/{a}/{yy}{yy+1}'))
+                    st.session_state[roster_key]=(people,duplicates)
+                except Exception as e: st.warning('Soupisky nejsou dostupné: '+str(e))
+            roster_report=st.session_state.get(roster_key)
+            selection_ok=False
+            if roster_report:
+                people,duplicates=roster_report
+                if duplicates: st.warning('Hráči uvedení v obou soupiskách byli vyřazeni.')
+                available={t:{pid:name for team,pid,name in people if team==t} for t in (h,a)}
+                chosen={}
+                for team in (h,a):
+                    names=available[team]
+                    with st.expander(f'{team} – výběr hráčů',expanded=True):
+                        ids=st.multiselect('Hráči, kteří mají nastoupit',list(names),format_func=lambda p:names[p],key=roster_key+'_'+team)
+                        chosen[team]=ids
+                        if ids:
+                            st.caption('Volitelné označení formací. Neovlivňuje výpočet.')
+                            for pid in ids: roles[int(pid)]={}
+                            used=set()
+                            for line in ('Útok 1','Útok 2','Útok 3','Útok 4','Obrana 1','Obrana 2','Obrana 3'):
+                                line_ids=st.multiselect(line,[p for p in ids if p not in used],format_func=lambda p:names[p],key=roster_key+'_'+team+'_'+line,max_selections=3 if line.startswith('Útok') else 2)
+                                for pid in line_ids: roles[int(pid)]['line']=line
+                                used.update(line_ids)
+                            pp_used=set()
+                            for pp in ('PP1','PP2'):
+                                pp_ids=st.multiselect(pp,[p for p in ids if p not in pp_used],format_func=lambda p:names[p],key=roster_key+'_'+team+'_'+pp,max_selections=5)
+                                for pid in pp_ids: roles[int(pid)]['pp']=pp
+                                pp_used.update(pp_ids)
+                        st.caption(f'Vybráno {len(ids)} hráčů; ostatní se nebudou stahovat.')
+                try:
+                    selected_ids=validate_selection(available,chosen)
+                    selection_ok=True
+                except ValueError as e: st.info(str(e))
+        key=(str(day),h,a,None if selection_mode=='Celá sezonní soupiska' else tuple(sorted(selected_ids or ())))
+        if st.button('Analyzovat / doplnit chybějící hráče',key='batch_run15',disabled=not selection_ok):
             if time.time()<api_state.get('blocked_until',0):
                 st.info('Pauza API ještě neskončila. Zkus tlačítko později.')
                 st.stop()
@@ -280,7 +324,7 @@ if page=='Hráči NHL':
             bar=st.progress(0.0,text='Načítám soupisky…')
             try:
                 def progress(i,n): bar.progress(i/n,text=f'Zpracováno {i}/{n} hráčů')
-                rows,errors,fetched=batch(PacedGet(get,api_state),h,a,day,yy,existing,progress)
+                rows,errors,fetched=batch(PacedGet(get,api_state),h,a,day,yy,existing,progress,selected_ids=selected_ids)
                 cache.update({(yy,pid):(time.time(),v) for pid,v in fetched.items()})
                 st.session_state['batch_logs15']=dict(sorted(cache.items(),key=lambda kv:kv[1][0])[-160:])
                 st.session_state['batch_report15']=(key,rows,errors)
@@ -289,6 +333,8 @@ if page=='Hráči NHL':
         report=st.session_state.get('batch_report15')
         if report and report[0]==key:
             _,rows,errors=report
+            rows=annotate(rows,roles) if selected_ids is not None else rows
+            st.caption('Rozsah: vlastní výběr uživatele.' if selected_ids is not None else 'Rozsah: sezonní soupiska.')
             st.caption(f'Analyzováno: {len(rows)} | Vynecháno: {len(errors)} záznamů soupisky. Úspěšně načtené historie se v této návštěvě uchovávají až 30 minut.')
             incomplete=not errors.empty and errors['Důvod'].str.contains('429',regex=False).any()
             if incomplete: st.warning('Neúplná analýza: NHL API omezilo požadavky. Po uplynutí pauzy znovu stiskni Analyzovat / doplnit chybějící hráče. Výsledky nereprezentují kompletní soupisky.')
@@ -298,7 +344,7 @@ if page=='Hráči NHL':
                 scope=st.radio('Zobrazit tým',['Oba týmy',h,a],horizontal=True,key='batch_scope15')
                 visible=rows if scope=='Oba týmy' else rows[rows['Tým']==scope]
                 visible=visible.sort_values([market,'Hráč'],ascending=[False,True])
-                st.dataframe(visible[['Tým','Hráč','Bod ANO','Bod NE','Gól ANO','Zápasy','Stav']].style.format({m:'{:.1%}' for m in ['Bod ANO','Bod NE','Gól ANO']}),hide_index=True)
+                st.dataframe(visible[['Tým','Hráč']+(['Formace','Přesilovka'] if selected_ids is not None else [])+['Bod ANO','Bod NE','Gól ANO','Zápasy','Stav']].style.format({m:'{:.1%}' for m in ['Bod ANO','Bod NE','Gól ANO']}),hide_index=True)
                 with st.expander('Produktivita a čas na ledě'):
                     st.dataframe(visible[['Tým','Hráč','Body/zápas L5','Body/zápas L10','Body/zápas L20','Čas na ledě L20 (min)','Poslední zápas']].style.format({m:'{:.2f}' for m in ['Body/zápas L5','Body/zápas L10','Body/zápas L20','Čas na ledě L20 (min)']}),hide_index=True)
             if not errors.empty:
@@ -336,7 +382,7 @@ if page=='Hráči NHL':
                     st.caption('Starších 70 % dostupných hracích dnů slouží k výběru váhy, novějších 30 % k testu. Nižší Brier a Log Loss jsou lepší. Váha 0 znamená žádnou korekci.')
                     st.dataframe(summary.style.format({'Brier':'{:.5f}','Log Loss':'{:.5f}','Beta':'{:.2f}'}),hide_index=True)
                     download_results('Stáhnout test i predikce soupeře (ZIP)',f'opponent_{day}_{h}_{a}.zip',('opponent_summary.csv',summary),('opponent_detail.csv',detail),('opponent_predictions.csv',adjusted),('opponent_context.csv',context))
-            metadata=pd.DataFrame([{'datum':str(day),'domaci':h,'hoste':a,'model':'v1.2 vyhlazena cetnost','podmineno_ucasti':True}])
+            metadata=pd.DataFrame([{'datum':str(day),'domaci':h,'hoste':a,'model':'v1.2 vyhlazena cetnost','podmineno_ucasti':True,'rozsah':selection_mode,'vybrani_id':','.join(map(str,sorted(selected_ids or ())))}])
             download_results('Stáhnout celou analýzu (ZIP)',f'players_{day}_{h}_{a}.zip',('hraci.csv',rows),('vynechani.csv',errors),('informace.csv',metadata))
         st.stop()
     from players import TEAMS,season_start,roster,logs,profile,backtest as player_test
@@ -621,9 +667,24 @@ if d is not None:
             st.write(f'**{team}** — posledních {len(matches)} zápasů: {sum(gf>ga)} V / {sum(gf==ga)} R / {sum(gf<ga)} P, skóre {int(gf.sum())}:{int(ga.sum())} po 60 min.')
             st.caption(f'V modelu: {len(past[past[venue]==team])} zápasů na příslušném hřišti.')
         st.caption('Forma mění poměr očekávaných gólů jen při zapnutí experimentálního modelu.')
-with st.expander('Potvrzení brankáři (poznámka)'):
-    st.text_input('Brankář domácích',key='goalie_home'); st.text_input('Brankář hostů',key='goalie_away')
-    st.caption('Jména jsou pouze poznámka; bez ověřených statistik nemění pravděpodobnosti.')
+with st.expander('Sestavy, brankáři a absence – poznámky'):
+    from lineups import match_key, GROUPS, note_table
+    lineup_day=cutoff if d is not None else st.date_input('Datum ručního scénáře',date.today(),key='lineup19_manual_day')
+    lk=match_key(mode,lineup_day,h,a)
+    st.caption('Platí pro tento zápas. Vyplň podle svého zdroje; poznámky nemění pravděpodobnosti. Uchovány během této návštěvy, export pro trvalé uložení.')
+    ls=st.selectbox('Stav sestavy',['Nepotvrzená / pracovní','Potvrzená dle uživatele'],key='lineup19_status_'+lk)
+    notes={}
+    for i,team in enumerate((h,a)):
+        st.markdown('**'+team+'**'); notes[team]={}
+        for group in GROUPS:
+            nk='lineup19_note_'+lk+'_'+str(i)+'_'+group
+            store=st.session_state.setdefault('lineup19_notes',{})
+            if nk not in st.session_state: st.session_state[nk]=store.get(nk,'')
+            value=st.text_input(group,key=nk,placeholder='Jména odděl čárkou')
+            store[nk]=value; notes[team][group]=value
+    table=note_table(mode,lineup_day,h,a,notes,ls)
+    if not table.empty:
+        download_file('Stáhnout sestavy a poznámky CSV',table.to_csv(index=False),file_name='sestavy_'+lk+'.csv')
 if not pro_active:
     st.subheader('Nejpravděpodobnější skóre'); st.dataframe(pd.DataFrame([(f'{i}:{j}',f'{v:.1%}') for i,j,v in scores],columns=['Skóre','Pravděpodobnost']),hide_index=True,use_container_width=True)
 if not pro_active: st.caption('Nezávislý Poisson; domácí/venkovní síla s vyhlazením 8 ligovými zápasy. Volitelné experimentální Elo + forma.')
