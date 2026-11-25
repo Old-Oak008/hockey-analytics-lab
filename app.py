@@ -105,9 +105,10 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.7 • Extraliga PRO Beta • týmové výsledky po 60 minutách')
+st.caption('v1.8 • European Hockey Beta • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
+from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
 import os
 import tempfile
 
@@ -145,6 +146,30 @@ def refresh_nhl(season, require_complete=False, force=False):
     st.session_state.get('nhl14_restored',{}).pop(season,None)
     return len(data),False
 
+def european_upload(league):
+    return session_upload('Historie a případný rozpis – '+league+' (CSV)', 'eu18_'+LEAGUES[league], multiple=True, types=['csv'])
+
+@st.cache_data(ttl=1800, max_entries=2, show_spinner=False)
+def open_standings(league):
+    return fetch_table(league)
+
+def standings_panel(league):
+    if league not in TABLE_URLS: return
+    with st.expander('Tabulka soutěže – otevřená data', expanded=False):
+        st.markdown('Zdroj: [SazkyWeb.cz – otevřená data](https://sazkyweb.cz/otevrena-data.html), CC BY 4.0. Tabulka není historie jednotlivých zápasů a nepoužívá se k predikci.')
+        slot='standings18_'+league
+        if st.button('Načíst tabulku '+league,key='load_'+slot):
+            try: st.session_state[slot]=open_standings(league)
+            except Exception as e: st.warning('Tabulku nelze aktualizovat: '+str(e))
+        if slot in st.session_state:
+            table,stamp=st.session_state[slot]
+            st.caption('Aktualizace zdroje: '+stamp)
+            try:
+                age=(pd.Timestamp.now(tz='UTC')-pd.Timestamp(stamp)).total_seconds()/3600
+                if age>48 or age<0: st.warning('Čas aktualizace je mimo očekávané období; zkontroluj aktuálnost zdroje.')
+            except Exception: pass
+            st.dataframe(table.rename(columns={'poradi':'#','tym':'Tým','zapasy':'Z','vyhry':'V','vyhry_prodl':'VP','prohry_prodl':'PP','prohry':'P','skore':'Skóre','body':'Body'}),hide_index=True)
+
 if page=='Datové centrum':
     st.subheader('Datové centrum')
     st.caption('Aktualizuj NHL jediným tlačítkem. MoneyPuck můžeš nahrát nebo obnovit z vlastní zálohy. Cloudové soubory nejsou trvalé; zálohu si ulož do Souborů nebo na Disk.')
@@ -178,6 +203,18 @@ if page=='Datové centrum':
     session_upload('Starší sezony vlastní soutěže','extra_own14_session',multiple=True,types=['csv'])
     session_upload('Starší sezony extraligy z oprávněného zdroje','extra_elh14_session',multiple=True,types=['csv'])
     st.caption('Vlastní CSV: date,home,away,hg,ag; skóre po 60 minutách. V rámci jednoho pole nemíchej soutěže.')
+    st.subheader('Evropské soutěže')
+    st.caption('Každá liga má samostatnou historii; v záloze se uchovají všechny nahrané ligy. Používej pouze oprávněně získané výsledky základní části po 60 minutách. Prázdné hg a ag označují rozpis, nikoliv 0:0.')
+    eu_choice=st.selectbox('Evropská soutěž',list(LEAGUES),key='eu_hub18')
+    eu_files=european_upload(eu_choice)
+    if eu_files:
+        try:
+            ed,ef=europe_history(eu_files)
+            st.success(f'{eu_choice}: {len(ed)} výsledků, {len(ef)} termínů včetně dokončených zápasů.')
+        except Exception as e: st.error(str(e))
+    standings_panel(eu_choice)
+    st.dataframe(pd.DataFrame([[name,len(st.session_state.get('eu18_'+code,()))] for name,code in LEAGUES.items()],columns=['Soutěž','Uložené CSV']),hide_index=True)
+    download_file('Šablona historie a rozpisu CSV','date,home,away,hg,ag\n',file_name='europe_template.csv')
     st.subheader('Jedna přenosná záloha')
     st.caption('Obsahuje načtené NHL sezony a původní nahrané soubory. Neobsahuje predikce, výsledky testů ani automaticky stažený rozpis extraligy. Nezveřejňuj soubory MoneyPuck na GitHubu.')
     if st.button('Připravit jednu zálohu dat (ZIP)',key='hub_pack14'):
@@ -360,11 +397,12 @@ if page=='Hráči NHL':
                 st.caption('Test jednotlivého hráče, jen předchozí zápasy, podmíněno účastí. Nejde o validaci celé NHL.')
     except Exception as e: st.error('Hráčská data: '+str(e))
     st.stop()
-mode=st.radio('Zdroj dat',['NHL API','Tipsport extraliga','Vlastní CSV','Ruční scénář'],horizontal=True)
+mode=st.selectbox('Soutěž / zdroj dat',['NHL API','Tipsport extraliga',*LEAGUES,'Vlastní CSV','Ruční scénář'])
 d=None
 mp=None
 pro=False
 elh_fixtures=[]
+eu_fixtures=[]
 if mode=='NHL API':
     year=date.today().year-(date.today().month<7)
     season=st.selectbox('Sezóna',[f'{y}{y+1}' for y in range(year,2020,-1)])
@@ -379,6 +417,7 @@ if mode=='NHL API':
     if d is not None: st.caption(f'Načteno {len(d)} zápasů, poslední datum {d.date.max().date()}')
     else: st.info('Klikni na stažení dat, obnov zálohu v Datovém centru nebo vyzkoušej ruční scénář.')
 elif mode=='Tipsport extraliga':
+    standings_panel(mode)
     from elh import load_elh, URL
     st.caption('Experimentální import: základní část 2026/27. Zdroj: iDNES.cz – los soutěže.')
     st.markdown(f'[Zdroj výsledků]({URL})')
@@ -396,6 +435,17 @@ elif mode=='Tipsport extraliga':
         st.caption(f'Načteno {len(d)} zápasů, poslední datum {d.date.max().date()}.')
         if pending: st.warning(f'{pending} minulých termínů bez rozpoznaného konečného skóre; historie může být neúplná.')
     else: st.info('Klikni na stažení dat. Při chybě lze využít vlastní CSV.')
+elif mode in LEAGUES:
+    standings_panel(mode)
+    st.caption('Samostatná historie '+mode+'. Automatický import výsledků této ligy zatím není ověřen; nahraj vlastní oprávněné CSV. Rozpis lze přidat v témže souboru s oběma skóre prázdnými.')
+    ef=european_upload(mode)
+    if ef:
+        try:
+            d,eu_fixtures=europe_history(ef)
+            if not d.empty: st.caption(f'{len(d)} zápasů | {d.date.min().date()} – {d.date.max().date()} | {len(set(d.home)|set(d.away))} týmů.')
+            else: st.info('Rozpis je načten, ale chybí dokončené výsledky.')
+        except Exception as e: st.error(str(e))
+    else: st.info('Zatím chybí historie. Bez ní model nebude generovat pravděpodobnosti.')
 elif mode=='Vlastní CSV':
     st.caption('Sloupce date,home,away,hg,ag; skóre po 60 minutách, datum YYYY-MM-DD.')
     download_file('Stáhnout prázdnou šablonu CSV','date,home,away,hg,ag\n',file_name='sablona.csv')
@@ -409,7 +459,8 @@ if mode=='Ruční scénář':
     lh=st.number_input('Očekávané góly domácích',.1,12.,2.5,.1); la=st.number_input('Očekávané góly hostů',.1,12.,3.2,.1)
 elif d is not None and not d.empty:
     with st.expander('Rozšíření historických dat (volitelné)'):
-        extra=session_upload('Starší sezony stejné soutěže, skóre po 60 minutách',{'NHL API':'extra_nhl14_session','Tipsport extraliga':'extra_elh14_session','Vlastní CSV':'extra_own14_session'}[mode],multiple=True,types=['csv'])
+        extra=[] if mode in LEAGUES else session_upload('Starší sezony stejné soutěže, skóre po 60 minutách',{'NHL API':'extra_nhl14_session','Tipsport extraliga':'extra_elh14_session','Vlastní CSV':'extra_own14_session'}[mode],multiple=True,types=['csv'])
+        if mode in LEAGUES: st.caption('Další sezony nahraj do stejného pole historie této ligy.')
         if extra:
             try:
                 combined=validate(pd.concat([d]+[pd.read_csv(f) for f in extra],ignore_index=True))
@@ -441,7 +492,7 @@ elif d is not None and not d.empty:
             history=merge_history(frames)
         else:
             history=merge_history([d])
-            st.caption('Starší sezony extraligy přidej výše pomocí CSV z oprávněného zdroje. Automatický archiv zatím není dostupný.')
+            st.caption('Starší sezony této soutěže přidej výše pomocí CSV z oprávněného zdroje. Automatický archiv zatím není dostupný.')
         st.dataframe(history.assign(Sezona=season_year(history.date)).groupby('Sezona').size().rename('Zápasů').reset_index(),hide_index=True)
         download_file('Export historických dat CSV',history.to_csv(index=False),file_name='historie.csv')
         st.caption('Historie pro sezonní test a modely PRO. Základní Poisson používá vybranou sezonu.')
@@ -471,6 +522,11 @@ elif d is not None and not d.empty:
         fixtures=[(h,a) for day,h,a in elh_fixtures if day==cutoff.isoformat() and h in teams and a in teams]
         if fixtures: game=st.selectbox('Zápasy extraligy (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
         else: st.caption('Pro vybraný den nejsou v rozpisu dostupné zápasy.')
+    if mode in LEAGUES:
+        fixtures=[(h,a) for day,h,a in eu_fixtures if day==cutoff.isoformat() and h in teams and a in teams]
+        if fixtures: game=st.selectbox('Zápasy '+mode+' (domácí – hosté)',[None]+fixtures,format_func=lambda x:'Vlastní výběr týmů' if x is None else ' – '.join(x))
+        else: st.caption('Pro tento den v nahraném rozpisu nejsou zápasy se známými týmy.')
+        if not past.empty and (pd.Timestamp(cutoff)-past.date.max()).days>14: st.warning('Historie před zvoleným datem je starší než 14 dní.')
     if mode=='NHL API':
         st.subheader('Model PRO – NHL')
         pro=st.checkbox('Použít modely PRO (v0.8 výsledek / v0.7 góly)',value=page=='Analýza zápasu',key='pro14_analysis' if page=='Analýza zápasu' else 'pro14_lab')
@@ -601,8 +657,8 @@ if d is not None and mode=='NHL API':
                 st.caption('Vyhodnocení pouze po 60 minutách. První záznam pro kombinaci modelů a zápas; ruční CSV není nezměnitelný auditní log.')
             except Exception as e: st.error(str(e))
 
-if d is not None and mode in ('Tipsport extraliga','Vlastní CSV'):
-    with st.expander('Extraliga / Multi-League PRO – vlastní test ligy',expanded=True):
+if d is not None and (mode in ('Tipsport extraliga','Vlastní CSV') or mode in LEAGUES):
+    with st.expander('Multi-League PRO – vlastní test ligy',expanded=True):
         from leaguepro import evaluate as league_eval, forecast as league_forecast, fingerprint
         from multileague import clean
         hist=clean(history,cutoff)

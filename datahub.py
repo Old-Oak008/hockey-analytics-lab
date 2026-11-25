@@ -6,8 +6,9 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED, BadZipFile
 import pandas as pd
 from model import validate
+from europe import SLOTS as EUROPE_SLOTS
 
-SLOTS = ('mp12_session', 'goalie12_session', 'own14_session', 'extra_elh14_session', 'extra_own14_session', 'extra_nhl14_session')
+SLOTS = ('mp12_session', 'goalie12_session', 'own14_session', 'extra_elh14_session', 'extra_own14_session', 'extra_nhl14_session') + EUROPE_SLOTS
 MAX_RAW = 180_000_000  # conservative budget for Community Cloud
 MAX_FILES = 48
 SEASON = re.compile(r'20\d{2}20\d{2}')
