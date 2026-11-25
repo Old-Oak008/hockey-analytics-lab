@@ -105,7 +105,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.6.1 • Opponent Intelligence • týmové výsledky po 60 minutách')
+st.caption('v1.7 • Extraliga PRO Beta • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 import os
@@ -602,32 +602,41 @@ if d is not None and mode=='NHL API':
             except Exception as e: st.error(str(e))
 
 if d is not None and mode in ('Tipsport extraliga','Vlastní CSV'):
-    with st.expander('Multi-League – experimentální model ostatních lig',expanded=True):
-        from multileague import evaluate as league_eval, forecast as league_forecast
-        import hashlib
-        st.caption('Pouze výsledky po 60 minutách jedné soutěže. Regrese s poločasem 180 dní, 14denní přeučování a samostatná váha pro 1X2 a góly. Hlavní model zůstává beze změny.')
-        league_key=(mode,str(cutoff),hashlib.sha256(history[history.date<pd.Timestamp(cutoff)].to_csv(index=False).encode()).hexdigest())
-        if st.button('Ověřit model této ligy',key='league_run13'):
+    with st.expander('Extraliga / Multi-League PRO – vlastní test ligy',expanded=True):
+        from leaguepro import evaluate as league_eval, forecast as league_forecast, fingerprint
+        from multileague import clean
+        hist=clean(history,cutoff)
+        league_key=(mode,str(cutoff),fingerprint(hist))
+        st.caption('Regrese s poločasy 90/180/365 dní a směsí s ligovým průměrem. Porovnání se základním Poissonem na stejných zápasech. Ladění před odděleným testem; vše po 60 minutách.')
+        st.write(f'Historie: {len(hist)} zápasů před zvoleným datem.')
+        if st.button('Ověřit model této ligy (PRO)',key='league_run17'):
             try:
                 with st.spinner('Chronologický test ligy…'):
-                    ls,ld,lc=league_eval(history,cutoff)
-                st.session_state['league_report13']=(league_key,ls,ld,lc)
+                    ls,ld,lc=league_eval(hist,cutoff)
+                st.session_state['league_report17']=(league_key,ls,ld,lc)
             except Exception as e:
-                st.session_state.pop('league_report13',None); st.info(str(e))
-        report=st.session_state.get('league_report13')
+                st.session_state.pop('league_report17',None); st.info(str(e))
+        report=st.session_state.get('league_report17')
         if report and report[0]==league_key:
             _,ls,ld,lc=report
-            st.caption(f"Ladění: {lc['tuning']} zápasů | oddělený test: {lc['test']} od {lc['split']}. Váha regrese 1X2 {lc['w1']:.0%}, góly {lc['wg']:.0%}.")
+            st.caption(f"Ladění: {lc['tuning']} | oddělený test: {lc['test']} od {lc['split']}. Váha regrese 1X2 {lc['w1']:.0%} ({lc['half1'] or 'bez regrese'} dní), góly {lc['wg']:.0%} ({lc['halfg'] or 'bez regrese'} dní).")
             st.dataframe(ls,hide_index=True,use_container_width=True)
-            st.caption('Nižší Brier a Log Loss jsou lepší. Malý test neprokazuje převahu; parametry nebyly vybírány podle testovací části.')
+            st.caption('Nižší Brier a Log Loss jsou lepší. Malý vzorek nestačí k potvrzení převahy; hlavní model zůstává beze změny.')
             try:
-                lp,lq=league_forecast(history,cutoff,h,a,lc)
-                st.markdown('**Experimentální predikce této ligy**')
-                st.dataframe(pd.DataFrame({'Výsledek':['Domácí','Remíza','Hosté'],'Pravděpodobnost':[f'{v:.1%}' for v in lp]}),hide_index=True)
-                st.dataframe(pd.DataFrame({'Hranice':['4.5','5.5','6.5'],'Over':[f'{v:.1%}' for v in lq],'Under':[f'{1-v:.1%}' for v in lq]}),hide_index=True)
-                st.caption('Model přeučený na všech zápasech před zvoleným dnem. Nejde o náhradu hlavní analýzy.')
-            except ValueError as e: st.info(str(e))
-            download_results('Stáhnout výsledky ligy (ZIP)','multileague_results.zip',('league_summary.csv',ls),('league_detail.csv',ld),('league_config.csv',pd.DataFrame([lc])))
+                pairs=list(dict.fromkeys([(h,a)]+[(x,y) for x,y in fixtures if min(((hist.home==x)|(hist.away==x)).sum(),((hist.home==y)|(hist.away==y)).sum())>=5]))
+                @st.cache_data(max_entries=8,show_spinner=False)
+                def league_predictions17(data,day,pairs,config):
+                    return league_forecast(data,day,pairs,config)
+                lp,lq=league_predictions17(hist,cutoff,tuple(pairs),lc)
+                st.markdown('**Experimentální predikce této ligy – vybraný zápas**')
+                st.dataframe(pd.DataFrame({'Výsledek':['Domácí','Remíza','Hosté'],'Pravděpodobnost':[f'{v:.1%}' for v in lp[0]]}),hide_index=True)
+                st.dataframe(pd.DataFrame({'Hranice':['4.5','5.5','6.5'],'Over':[f'{v:.1%}' for v in lq[0]],'Under':[f'{1-v:.1%}' for v in lq[0]]}),hide_index=True)
+                if len(pairs)>1:
+                    with st.expander('Experimentální přehled všech dostupných zápasů dne'):
+                        st.dataframe(pd.DataFrame([[x+' – '+y,*[f'{v:.1%}' for v in pp],*[f'{v:.1%}' for v in qq]] for (x,y),pp,qq in zip(pairs,lp,lq)],columns=['Zápas','1','X','2','O4.5','O5.5','O6.5']),hide_index=True)
+                st.caption('Experimentální model přeučený na všech zápasech před zvoleným dnem.')
+            except Exception as e: st.info(str(e))
+            download_results('Stáhnout výsledky ligy (ZIP)','league_pro_results.zip',('league_summary.csv',ls),('league_detail.csv',ld),('league_config.csv',pd.DataFrame([lc])))
 
 if page!='Validační laboratoř / brankáři':
     st.stop()
