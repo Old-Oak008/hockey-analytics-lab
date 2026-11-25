@@ -105,7 +105,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.5 • Player Intelligence • týmové výsledky po 60 minutách')
+st.caption('v1.6 • Opponent Intelligence • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 import os
@@ -211,7 +211,7 @@ if page=='Hráči NHL':
         from players import TEAMS, season_start
         import time
         st.subheader('Hráči obou týmů – hromadná analýza')
-        st.caption('Pouze NHL, základní část. Zdroj: NHL API. Odhady platí, pouze pokud hráč nastoupí. Sezonní soupiska není potvrzenou sestavou. Výsledek početně zahrnuje prodloužení, nikoli nájezdy. Stejný model jako v1.2; vliv soupeře zatím není zahrnut.')
+        st.caption('Pouze NHL, základní část. Zdroj: NHL API. Odhady platí, pouze pokud hráč nastoupí. Sezonní soupiska není potvrzenou sestavou. Výsledek početně zahrnuje prodloužení, nikoli nájezdy. Základní model v1.2 zůstává výchozí. Vliv soupeře lze samostatně otestovat z uložených výsledků NHL.')
         day=st.date_input('Datum zápasu (dle rozpisu NHL)',date.today(),key='batch_day15')
         yy=season_start(day)
         @st.cache_data(ttl=900,show_spinner=False,max_entries=24)
@@ -229,6 +229,7 @@ if page=='Hráči NHL':
         key=(str(day),h,a)
         if st.button('Analyzovat hráče obou týmů',key='batch_run15'):
             st.session_state.pop('batch_report15',None)
+            st.session_state.pop('opponent_report16',None)
             now=time.time()
             cache=st.session_state.setdefault('batch_logs15',{})
             cache={k:v for k,v in cache.items() if now-v[0]<1800}
@@ -258,6 +259,38 @@ if page=='Hráči NHL':
             if not errors.empty:
                 with st.expander('Vynechaní hráči a důvody'):
                     st.dataframe(errors,hide_index=True)
+            if not rows.empty:
+                st.markdown('### Vliv soupeře – v1.6 experiment')
+                st.caption('Používá uloženou historii NHL, nikoli další soubory. Zohledňuje inkasované góly soupeře po 60 minutách; hráčské body a góly zahrnují i prodloužení. Základní predikce zůstávají nezměněné.')
+                if st.button('Spočítat a otestovat vliv soupeře',key='opp_run16'):
+                    st.session_state.pop('opponent_report16',None)
+                    try:
+                        from opponent import analyze as opponent_analyze
+                        histories=[]
+                        for y in range(yy-2,yy+1):
+                            frame=nhl_data(f'{y}{y+1}')
+                            if frame is not None: histories.append(frame)
+                        if not histories: raise ValueError('Nejdříve obnov zálohu nebo načti NHL v Datovém centru.')
+                        history=pd.concat(histories,ignore_index=True)
+                        cache=st.session_state.get('batch_logs15',{})
+                        ids=set(rows['ID']); raw={pid:v[1] for (year,pid),v in cache.items() if year==yy and pid in ids and not v[1][1]}
+                        if not raw: raise ValueError('Historie hráčů není v paměti. Znovu spusť hromadnou analýzu.')
+                        with st.spinner('Testuji vliv soupeře na dřívějších zápasech hráčů…'):
+                            adjusted,summary,detail,context=opponent_analyze(history,raw,rows,day,h,a)
+                        st.session_state['opponent_report16']=(key,adjusted,summary,detail,context,len(raw))
+                    except Exception as e: st.warning('Experiment není dostupný: '+str(e))
+                opp_report=st.session_state.get('opponent_report16')
+                if opp_report and opp_report[0]==key:
+                    _,adjusted,summary,detail,context,n_players=opp_report
+                    st.caption(f'Test vychází z historií {n_players} hráčů vybraných sezonních soupisek, kteří mají načtené obě dostupné sezony. Není to nezávislá validace všech hráčů NHL. Výběr hráčů může zkreslit výsledek.')
+                    st.dataframe(context.style.format({'GA/60 vyhlazené':'{:.2f}','Ligový průměr':'{:.2f}'}),hide_index=True)
+                    view=adjusted if scope=='Oba týmy' else adjusted[adjusted['Tým']==scope]
+                    col=market+' v1.6'; view=view.assign(Změna=view[col]-view[market]).sort_values(col,ascending=False)
+                    st.dataframe(view[['Tým','Hráč',market,col,'Změna']].style.format({market:'{:.1%}',col:'{:.1%}','Změna':lambda x:f'{100*x:+.1f} p. b.'}),hide_index=True)
+                    st.markdown('**Historický test na stejných hráčských zápasech**')
+                    st.caption('Starších 70 % dostupných hracích dnů slouží k výběru váhy, novějších 30 % k testu. Nižší Brier a Log Loss jsou lepší. Váha 0 znamená žádnou korekci.')
+                    st.dataframe(summary.style.format({'Brier':'{:.5f}','Log Loss':'{:.5f}','Beta':'{:.2f}'}),hide_index=True)
+                    download_results('Stáhnout test i predikce soupeře (ZIP)',f'opponent_{day}_{h}_{a}.zip',('opponent_summary.csv',summary),('opponent_detail.csv',detail),('opponent_predictions.csv',adjusted),('opponent_context.csv',context))
             metadata=pd.DataFrame([{'datum':str(day),'domaci':h,'hoste':a,'model':'v1.2 vyhlazena cetnost','podmineno_ucasti':True}])
             download_results('Stáhnout celou analýzu (ZIP)',f'players_{day}_{h}_{a}.zip',('hraci.csv',rows),('vynechani.csv',errors),('informace.csv',metadata))
         st.stop()
