@@ -105,7 +105,7 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.10 • Prediction Journal Beta • týmové výsledky po 60 minutách')
+st.caption('v1.11 • Result Tracking Beta • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
@@ -208,8 +208,8 @@ if page=='Archiv predikcí':
                 try: sync_journal(); st.success('Soukromý archiv synchronizován.')
                 except Exception as e: st.error(str(e))
             if st.button('Zamknout a odstranit archiv z relace',key='journal_lock110'):
-                st.session_state.pop('journal110_unlocked',None); st.session_state.pop('journal110',None); st.session_state.pop('journal110_eval',None); st.rerun()
-    else: st.info('Přenosný režim: archiv je pouze v této návštěvě. Pro trvalé ukládání je potřeba soukromý GitHub a nastavení Secrets.')
+                st.session_state.pop('journal110_unlocked',None); st.session_state.pop('journal110',None); st.session_state.pop('journal110_eval',None); st.session_state.pop('journal111_scores',None); st.session_state.pop('journal111_report',None); st.session_state.pop('journal111_cursor',None); st.rerun()
+    else: st.info('Přenosný režim: archiv je pouze v této návštěvě. Pro trvalé ukládání zkontroluj sekci [archive] ve Streamlit Secrets (repository, token, password alespoň 24 znaků).')
     imports=st.file_uploader('Import dříve uložených predikcí nebo archivu CSV',type='csv',accept_multiple_files=True,key='journal_import110')
     if imports and st.button('Přidat soubory do archivu',key='journal_add110'):
         try:
@@ -223,24 +223,36 @@ if page=='Archiv predikcí':
     if not records.empty:
         st.dataframe(records[['date','home','away','model_1x2','model_goals','origin']].sort_values('date',ascending=False),hide_index=True)
         download_file('Stáhnout celý archiv CSV',archive_encode(records),file_name='hockey_prediction_archive.csv',mime='text/csv')
-        if st.button('Vyhodnotit podle načtených výsledků NHL',key='journal_eval110'):
+        st.caption('Výsledky se načítají přímo z NHL pouze pro data uložených zápasů. Historii pěti sezon ani MoneyPuck nemusíš obnovovat.')
+        from archive_eval import refresh as journal_refresh, evaluate as journal_evaluate
+        if st.button('Aktualizovat výsledky a vyhodnotit archiv',key='journal_eval111'):
             try:
-                from history import merge_history
-                from hybrid import score_archive
-                years=sorted(set(st.session_state.get('nhl14_restored',{}))|{p.stem[4:] for p in Path('data').glob('nhl_*.csv')})
-                frames=[nhl_data(y) for y in years]; frames=[f for f in frames if f is not None and not f.empty]
-                if not frames: raise ValueError('Nejdříve načti nebo obnov výsledky NHL v Datovém centru.')
-                result,detail,matched,pending=score_archive(records,merge_history(frames),date.today())
-                st.session_state['journal110_eval']=(archive_encode(records),result,detail,matched,pending)
-            except Exception as e: st.error(str(e))
-        ev=st.session_state.get('journal110_eval')
-        if ev and ev[0]==archive_encode(records):
-            _,result,detail,matched,pending=ev
-            st.write(f'Vyhodnocené záznamy: {matched}; dosud bez dostupného výsledku: {pending}.')
-            if not result.empty:
-                st.dataframe(result,hide_index=True)
-                download_results('Stáhnout celé vyhodnocení ZIP','journal_evaluation.zip',('summary.csv',result),('detail.csv',detail))
-            st.caption('Vyhodnocení pouze po 60 minutách, podle načtené historie. Po aktualizaci výsledků spusť znovu.')
+                if cloud_unlocked():
+                    sync_journal(); records=journal()
+                status=st.empty()
+                def journal_progress(i,n,d):
+                    st.session_state['journal111_cursor']=d
+                    status.caption(f'{i+1}/{n}: {d}')
+                with st.spinner('Ověřuji výsledky NHL…'):
+                    known,errors,checked,total=journal_refresh(records,st.session_state.get('journal111_scores',{}),get,progress=journal_progress,after=st.session_state.get('journal111_cursor'))
+                status.empty()
+                st.session_state['journal111_scores']=known
+                st.session_state['journal111_report']=(errors,checked,total)
+            except Exception as e: st.error('Aktualizace se nezdařila: '+str(e))
+        known=st.session_state.get('journal111_scores',{})
+        report=st.session_state.get('journal111_report')
+        if report is not None:
+            errors,checked,total=report
+            st.caption(f'Ověřené hrací dny při poslední aktualizaci: {checked} z {total} čekajících. Nejvýše 30 dat na jeden pokus.')
+            for msg in errors: st.warning(msg)
+            if total>30: st.info('Pro zbývající data použij stejné tlačítko znovu.')
+            summary,detail,games=journal_evaluate(records,known)
+            st.write(f"Vyhodnoceno: {int(games.Stav.eq('Vyhodnoceno').sum())} · Čeká: {int(games.Stav.str.startswith('Čeká').sum())} · Vyloučeno: {int(games.Stav.str.startswith('Vyloučeno').sum())}")
+            if not summary.empty: st.dataframe(summary,hide_index=True)
+            st.dataframe(games,hide_index=True)
+            download_results('Stáhnout kompletní vyhodnocení ZIP','journal_evaluation.zip',('summary.csv',summary),('detail.csv',detail),('games.csv',games))
+            st.caption('Pouze základní část NHL, po 60 minutách. Importované predikce jsou hodnoceny odděleně; jejich čas je deklarovaný, nikoli nezávisle ověřený. Výsledky se obnovují na vyžádání, nikoli na pozadí. Již načtené výsledky jsou uchovány pouze v této návštěvě.')
+
     st.stop()
 
 if page=='Datové centrum':
