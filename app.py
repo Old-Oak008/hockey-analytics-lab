@@ -105,8 +105,8 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.9 • Lineup Intelligence Beta • týmové výsledky po 60 minutách')
-page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Validační laboratoř / brankáři'],horizontal=True,key='page12')
+st.caption('v1.10 • Prediction Journal Beta • týmové výsledky po 60 minutách')
+page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
 from datahub import SLOTS, season_data, complete, build_backup, restore_backup
 from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
 import os
@@ -169,6 +169,79 @@ def standings_panel(league):
                 if age>48 or age<0: st.warning('Čas aktualizace je mimo očekávané období; zkontroluj aktuálnost zdroje.')
             except Exception: pass
             st.dataframe(table.rename(columns={'poradi':'#','tym':'Tým','zapasy':'Z','vyhry':'V','vyhry_prodl':'VP','prohry_prodl':'PP','prohry':'P','skore':'Skóre','body':'Body'}),hide_index=True)
+
+from archive_store import empty as archive_empty, merge as archive_merge, encode as archive_encode, decode as archive_decode, PrivateGitHub, STATUS as ARCHIVE_STATUS
+import hmac
+
+def journal():
+    return st.session_state.get('journal110',archive_empty())
+
+def cloud_config():
+    try:
+        c=st.secrets['archive']; repo=str(c['repository']); token=str(c['token']); password=str(c['password'])
+        return (repo,token,password) if len(password)>=24 and token else None
+    except Exception: return None
+
+def cloud_unlocked():
+    c=cloud_config()
+    return bool(c and st.session_state.get('journal110_unlocked')==c[0])
+
+def sync_journal():
+    if not cloud_unlocked(): raise ValueError('Nejprve odemkni soukromý archiv.')
+    c=cloud_config(); remote=PrivateGitHub(c[0],c[1]).sync(journal())
+    st.session_state['journal110']=remote
+
+if page=='Archiv predikcí':
+    st.subheader('Archiv předzápasových predikcí NHL')
+    st.caption('První záznam pro zápas a kombinaci modelů je zachován. Archiv není neměnný auditní log. Importované CSV mají pouze deklarovaný předzápasový status.')
+    cfg=cloud_config()
+    if cfg:
+        if not cloud_unlocked():
+            with st.form('unlock110',clear_on_submit=True):
+                pw=st.text_input('Heslo soukromého archivu',type='password')
+                if st.form_submit_button('Odemknout'):
+                    if hmac.compare_digest(pw.encode(),cfg[2].encode()):
+                        st.session_state['journal110_unlocked']=cfg[0]; st.rerun()
+                    else: st.error('Nesprávné heslo.')
+        else:
+            if st.button('Synchronizovat soukromý archiv',key='journal_sync110'):
+                try: sync_journal(); st.success('Soukromý archiv synchronizován.')
+                except Exception as e: st.error(str(e))
+            if st.button('Zamknout a odstranit archiv z relace',key='journal_lock110'):
+                st.session_state.pop('journal110_unlocked',None); st.session_state.pop('journal110',None); st.session_state.pop('journal110_eval',None); st.rerun()
+    else: st.info('Přenosný režim: archiv je pouze v této návštěvě. Pro trvalé ukládání je potřeba soukromý GitHub a nastavení Secrets.')
+    imports=st.file_uploader('Import dříve uložených predikcí nebo archivu CSV',type='csv',accept_multiple_files=True,key='journal_import110')
+    if imports and st.button('Přidat soubory do archivu',key='journal_add110'):
+        try:
+            dnew=archive_empty()
+            for f in imports: dnew=archive_merge(dnew,archive_decode(f.getvalue(),imported=True))
+            updated=archive_merge(journal(),dnew); archive_encode(updated); st.session_state['journal110']=updated
+            st.success(f'Archiv obsahuje {len(updated)} záznamů.')
+        except Exception as e: st.error(str(e))
+    records=journal()
+    st.metric('Uložené predikce',len(records))
+    if not records.empty:
+        st.dataframe(records[['date','home','away','model_1x2','model_goals','origin']].sort_values('date',ascending=False),hide_index=True)
+        download_file('Stáhnout celý archiv CSV',archive_encode(records),file_name='hockey_prediction_archive.csv',mime='text/csv')
+        if st.button('Vyhodnotit podle načtených výsledků NHL',key='journal_eval110'):
+            try:
+                from history import merge_history
+                from hybrid import score_archive
+                years=sorted(set(st.session_state.get('nhl14_restored',{}))|{p.stem[4:] for p in Path('data').glob('nhl_*.csv')})
+                frames=[nhl_data(y) for y in years]; frames=[f for f in frames if f is not None and not f.empty]
+                if not frames: raise ValueError('Nejdříve načti nebo obnov výsledky NHL v Datovém centru.')
+                result,detail,matched,pending=score_archive(records,merge_history(frames),date.today())
+                st.session_state['journal110_eval']=(archive_encode(records),result,detail,matched,pending)
+            except Exception as e: st.error(str(e))
+        ev=st.session_state.get('journal110_eval')
+        if ev and ev[0]==archive_encode(records):
+            _,result,detail,matched,pending=ev
+            st.write(f'Vyhodnocené záznamy: {matched}; dosud bez dostupného výsledku: {pending}.')
+            if not result.empty:
+                st.dataframe(result,hide_index=True)
+                download_results('Stáhnout celé vyhodnocení ZIP','journal_evaluation.zip',('summary.csv',result),('detail.csv',detail))
+            st.caption('Vyhodnocení pouze po 60 minutách, podle načtené historie. Po aktualizaci výsledků spusť znovu.')
+    st.stop()
 
 if page=='Datové centrum':
     st.subheader('Datové centrum')
@@ -692,8 +765,8 @@ st.caption('Bez kalibrace brankářů, sestav a prodloužení. Férový kurz nen
 if d is not None and mode=='NHL API':
     from datetime import datetime, timezone
     st.subheader('Export predikce')
-    st.caption('CSV si ulož do Souborů nebo na Disk. Cloudové uložení není trvalé. Export zaznamenává skutečný čas vytvoření a modely; starší nebo rozehrané zápasy nelze považovat za předzápasový test.')
-    if st.button('Připravit záznam predikce'):
+    st.caption('Ulož předzápasovou predikci do společného archivu jedním tlačítkem. Bez nastaveného a odemčeného soukromého úložiště zůstane jen v této návštěvě. Starší a rozehrané zápasy se do archivu neukládají.')
+    if st.button('Uložit předzápasovou predikci do archivu'):
         now=datetime.now(timezone.utc); status='neověřený scénář'
         try:
             payload=get('/schedule/'+cutoff.isoformat()); matches=[g for w in payload['gameWeek'] for g in w['games'] if g.get('gameDate',w['date'])==cutoff.isoformat() and g['homeTeam']['abbrev']==h and g['awayTeam']['abbrev']==a and g.get('gameType')==2]
@@ -701,6 +774,19 @@ if d is not None and mode=='NHL API':
         except Exception: pass
         rec={'created_utc':now.isoformat(),'date':cutoff.isoformat(),'home':h,'away':a,'status':status,'model_1x2':model_1x2,'model_goals':model_goals,'p1':p[0],'px':p[1],'p2':p[2],**{f'over_{k}':v for k,v in totals}}
         st.session_state['pro_export']=(cutoff,h,a,model_1x2,model_goals,tuple(p),tuple(totals),pd.DataFrame([rec]).to_csv(index=False),status)
+        if status==ARCHIVE_STATUS:
+            try:
+                rec['origin']='aplikace'
+                before=len(journal()); updated=archive_merge(journal(),pd.DataFrame([rec])); archive_encode(updated); st.session_state['journal110']=updated
+                if len(updated)>before: st.success('Predikce přidána do archivu této návštěvy.')
+                else: st.info('První predikce pro tento zápas a modely již existuje.')
+                if cloud_unlocked():
+                    try: sync_journal(); st.success('Uloženo také do soukromého GitHub archivu.')
+                    except Exception as e: st.warning(str(e))
+                else: st.info('Pro trvalé uložení otevři Archiv predikcí a synchronizuj, nebo stáhni celý archiv CSV.')
+            except Exception as e: st.error(str(e))
+        else: st.warning('Předzápasový stav nebyl ověřen. Scénář není v archivu; samostatný CSV export je dostupný.')
+
     rec=st.session_state.get('pro_export')
     if rec and rec[:7]==(cutoff,h,a,model_1x2,model_goals,tuple(p),tuple(totals)):
         st.caption(rec[8]); download_file('Stáhnout záznam predikce CSV',rec[7],file_name=f'predikce_{cutoff}_{h}_{a}.csv')
