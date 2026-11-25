@@ -109,10 +109,10 @@ def compare(d):
 from nhl import load, get
 st.set_page_config(page_title='Hockey Analytics Lab',page_icon='🏒',layout='centered')
 st.markdown('## 🏒 Hockey Analytics Lab')
-st.caption('v1.14.1 • European History Fix • týmové výsledky po 60 minutách')
+st.caption('v1.14.2 • European Import Fix • týmové výsledky po 60 minutách')
 page=st.radio('Režim',['Analýza zápasu','Hráči NHL','Datové centrum','Archiv predikcí','Validační laboratoř / brankáři'],horizontal=True,key='page12')
-from datahub import SLOTS, season_data, complete, build_backup, restore_backup
-from europe import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
+from datahub_v1142 import SLOTS, season_data, complete, build_backup, restore_backup
+from europe_v1142 import LEAGUES, TABLE_URLS, read_history as europe_history, fetch_table
 import os
 import tempfile
 
@@ -296,9 +296,14 @@ def european_history_panel():
         info=lookup[lid]; slot='eu18_'+aliases[info['name'].strip().lower()]
         destination=next((name for name,code in LEAGUES.items() if 'eu18_'+code==slot),None)
         if destination is None or slot not in SLOTS:
-            st.warning('Cílová databáze pro tuto soutěž chybí. Aktualizuj europe.py a případně datahub.py. Žádná data nebyla změněna.')
+            st.warning('Cílová databáze chybí. Zkontroluj, zda jsou nahrány všechny tři soubory v1.14.2. Žádná data nebyla změněna.')
             return
         st.caption('Cílová databáze v Analýze zápasu: '+destination)
+        if st.session_state.get(slot):
+            try:
+                saved,_=europe_history([BytesIO(raw) for _,raw in st.session_state[slot]])
+                st.success(f'V databázi již uloženo {len(saved)} zápasů. Poslední výsledek: {saved.date.max().date() if not saved.empty else "—"}.')
+            except ValueError as e: st.warning('Uložená historie: '+str(e))
         if sum(aliases[x['name'].strip().lower()]==aliases[info['name'].strip().lower()] for x in lookup.values())>1:
             st.warning('API nabízí více názvů/ID pro tuto soutěž. Vyber správné ID a sezonu. Historie různých ID se automaticky neslučuje.')
         current=date.today().year-(date.today().month<7)
@@ -335,7 +340,12 @@ def european_history_panel():
         regular=[x for x in categories if x.lower() in ('fáze: regular season','fáze: regular','fáze: základní část','kolo: regular season')]
         selected=st.multiselect('Vyber pouze základní část',sorted(categories),default=regular,key=f'api113_stages_{lid}_{"_".join(map(str,sorted(subset)))}')
         st.caption('Pokud zdroj fázi neoznačuje, ověř ji v rozpisu soutěže. Play-off, baráž a přípravu nezahrnuj.')
-        verified=st.checkbox('Ověřil jsem, že vybrané skupiny patří pouze do základní části',key=f'api114_verified_{lid}_{repr(sorted(subset))}_{repr(sorted(selected))}')
+        # Exact regular-season labels are safe to preselect; ambiguous labels still require confirmation.
+        verified=bool(selected) and set(selected).issubset(regular)
+        if not verified:
+            verified=st.checkbox('Ověřil jsem, že vybrané skupiny patří pouze do základní části',key=f'api114_verified_{lid}_{repr(sorted(subset))}_{repr(sorted(selected))}')
+        else:
+            st.caption('API výslovně označuje vybrané skupiny jako základní část.')
         if not selected: return
         try:
             df,counts=api_convert(subset,lid,selected)
@@ -354,11 +364,11 @@ def european_history_panel():
             if st.session_state.get(slot):
                 st.warning('Použitím nahradíš dosavadní historii cílové databáze, včetně ručně nahraných sezon. Předem si stáhni zálohu. Ostatní soutěže zůstanou beze změny.')
                 replace_ok=st.checkbox('Chci nahradit historii: '+destination,key=f'api114_replace_{lid}_{repr(sorted(subset))}_{repr(sorted(selected))}')
-            if st.button('Použít ověřené výsledky v analýze',key='api113_apply',disabled=not (verified and replace_ok)):
+            if st.button('Uložit historii do databáze',key='api113_apply',disabled=not (verified and replace_ok),type='primary'):
                 st.session_state[slot]=((f'api_hockey_{lid}_historie.csv',raw),)
                 st.session_state[slot+'_generation']=st.session_state.get(slot+'_generation',0)+1
                 st.session_state.pop('hub_zip14',None)
-                st.success('Historie uložena pro tuto návštěvu. Vyber v Analýze zápasu cílovou soutěž uvedenou výše. Pro další návštěvu připrav novou zálohu.')
+                st.success(f'Uloženo {len(hist)} zápasů do {destination}. Vyber tuto soutěž v Analýze zápasu. Pro další návštěvu připrav novou ZIP zálohu.')
             if verified: download_file('Stáhnout převedenou historii CSV',raw,file_name=f'api_hockey_{lid}_historie.csv',mime='text/csv')
         except (ValueError,TypeError,KeyError) as e: st.error('Historii nelze bezpečně zpracovat: '+str(e))
 
@@ -397,6 +407,7 @@ if page=='Datové centrum':
     session_upload('Starší sezony extraligy z oprávněného zdroje','extra_elh14_session',multiple=True,types=['csv'])
     st.caption('Vlastní CSV: date,home,away,hg,ag; skóre po 60 minutách. V rámci jednoho pole nemíchej soutěže.')
     st.subheader('Evropské soutěže')
+    st.caption(f'Datové moduly v1.14.2 • {len(LEAGUES)} cílových databází • {sum("eu18_"+code in SLOTS for code in LEAGUES.values())} dostupných pro zálohu')
     european_history_panel()
     st.caption('Každá liga má samostatnou historii; v záloze se uchovají všechny nahrané ligy. Používej pouze oprávněně získané výsledky základní části po 60 minutách. Prázdné hg a ag označují rozpis, nikoliv 0:0.')
     eu_choice=st.selectbox('Evropská soutěž',list(LEAGUES),key='eu_hub18')
@@ -407,7 +418,19 @@ if page=='Datové centrum':
             st.success(f'{eu_choice}: {len(ed)} výsledků, {len(ef)} termínů včetně dokončených zápasů.')
         except Exception as e: st.error(str(e))
     standings_panel(eu_choice)
-    st.dataframe(pd.DataFrame([[name,len(st.session_state.get('eu18_'+code,()))] for name,code in LEAGUES.items()],columns=['Soutěž','Uložené CSV']),hide_index=True)
+    overview=[]
+    for name,code in LEAGUES.items():
+        payload=st.session_state.get('eu18_'+code,())
+        if not payload:
+            overview.append([name,0,'—','Chybí']); continue
+        try:
+            h0,f0=europe_history([BytesIO(raw) for _,raw in payload])
+            last=h0.date.max().date() if not h0.empty else None
+            state='Pouze historie / zastaralá' if last and (date.today()-last).days>14 else ('Načteno' if last else 'Pouze rozpis')
+            overview.append([name,len(h0),str(last) if last else '—',state])
+        except Exception:
+            overview.append([name,None,'—','Neplatná data'])
+    st.dataframe(pd.DataFrame(overview,columns=['Soutěž','Uložené zápasy','Poslední výsledek','Stav']),hide_index=True)
     download_file('Šablona historie a rozpisu CSV','date,home,away,hg,ag\n',file_name='europe_template.csv')
     st.subheader('Jedna přenosná záloha')
     st.caption('Obsahuje načtené NHL sezony a původní nahrané soubory. Neobsahuje predikce, výsledky testů ani automaticky stažený rozpis extraligy. Nezveřejňuj soubory MoneyPuck na GitHubu.')
